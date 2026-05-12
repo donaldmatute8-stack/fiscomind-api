@@ -410,3 +410,31 @@ def complemento_pago():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=True)
+@app.route('/factura/<uuid>/estatus', methods=['PATCH'])
+def update_factura_estatus(uuid):
+    """Update invoice status (e.g. mark as cancelled)"""
+    data = request.json or {}
+    new_estatus = data.get('estatus')
+    notas = data.get('notas', '')
+    
+    if not new_estatus:
+        return jsonify({"status": "error", "message": "estatus requerido"}), 400
+    
+    cache = load_cache()
+    emitidos = cache.get('emitidos', [])
+    
+    found = False
+    for f in emitidos:
+        if f.get('uuid', '').upper().startswith(uuid.upper()):
+            f['estatus'] = new_estatus
+            if notas:
+                f['notas'] = notas
+            found = True
+            break
+    
+    if not found:
+        return jsonify({"status": "error", "message": "Factura no encontrada"}), 404
+    
+    save_cache(cache)
+    return jsonify({"status": "success", "message": f"Estatus actualizado a {new_estatus}", "uuid": uuid})
+
