@@ -1,9 +1,10 @@
 import logging
+import requests
 from datetime import datetime
 from typing import Dict, Any
 
-from sat_connector import SATConnector
-from sat_models import SATAuthCredentials, CFDIModel, ComplianceOpinion
+# Mock de SATConnector para el bot
+from sat_models import SATAuthCredentials
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -14,15 +15,23 @@ class FiscoAgent:
     Agente principal que orquesta la interacción con el SAT y genera insights fiscales.
     """
     
-    def __init__(self, credentials: SATAuthCredentials):
-        self.credentials = credentials
-        self.connector = SATConnector(
-            rfc=credentials.rfc,
-            password=credentials.password,
-            efirma_path=credentials.efirma_path,
-            efirma_key=credentials.efirma_key
-        )
-        
+    def __init__(self, bot_token: str, api_base: str = "https://fiscomind-api-production.up.railway.app"):
+        self.bot_token = bot_token
+        self.api_base = api_base
+
+    def _call_api(self, endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
+        url = f"{self.api_base}{endpoint}"
+        try:
+            if method == "POST":
+                res = requests.post(url, json=data, timeout=10)
+            else:
+                res = requests.get(url, timeout=10)
+            res.raise_for_status()
+            return res.json()
+        except Exception as e:
+            logger.error(f"API Error {endpoint}: {e}")
+            return {"status": "error", "message": str(e)}
+
     def handle_telegram_event(self, event: Dict[str, Any]):
         """
         Recibe eventos del bot de Telegram y coordina la respuesta.
@@ -38,47 +47,52 @@ class FiscoAgent:
             return self.execute_compliance_check()
         elif "status" in text or "estatus" in text:
             return self.execute_status_query()
+        elif "factura" in text and "emitir" in text:
+            return "Para emitir una factura, por favor usa la Mini App de FiscoMind: 📱 [Abrir Mini App](https://fiscomind-app.vercel.app)"
+        elif "dashboard" in text or "resumen" in text:
+            dash = self._call_api("/dashboard")
+            if dash.get("status") == "error":
+                return "Error al obtener el resumen fiscal."
+            
+            s = dash.get("summary", {})
+            return (f"📊 *Resumen Fiscal*\n\n"
+                    f"Ingresos: ${s.get('total_ingresos', 0):,.2f}\n"
+                    f"Egresos: ${s.get('total_egresos', 0):,.2f}\n"
+                    f"Deducibles: {s.get('deducibles_count', 0)} docs\n"
+                    f"Ahorro ISR est: ${s.get('ahorro_isr_estimado', 0):,.2f}\n\n"
+                    f"📅 Última sinc: {dash.get('last_sync', 'N/A')}")
         else:
-            return "Lo siento, no reconozco el comando. Prueba con 'descargar CFDI' o 'consultar opinión'."
+            return "Hola Marco. Soy tu Asistente Fiscal IA. Puedo ayudarte a:\n- 📊 Consultar tu resumen fiscal (di 'resumen')\n- 📑 Descargar CFDIs (di 'descargar CFDI')\n- ✅ Ver tu Opinión de Cumplimiento (di 'opinión')\n- 📄 Emitir facturas (usa la Mini App)\n\n¿En qué puedo ayudarte?"
 
     def execute_cfdi_download(self) -> str:
         """
-        Coordina la descarga de CFDIs y el parseo.
+        Sincroniza con el SAT vía API Railway.
         """
         try:
-            # 1. Descarga via connector
-            raw_cfdis = self.connector.download_cfdis(
-                date_start="2024-01-01", 
-                date_end=datetime.now().strftime("%Y-%m-%d"), 
-                type="recibidos"
-            )
-            
-            # 2. (Simulado) Pasaría a cfdi_parser y deduction_engine
-            # Aquí coordinamos el flujo: Download -> Parse -> Deduct -> Alert
-            
-            summary = f"Se han descargado {len(raw_cfdis)} CFDIs. Analizando deducciones..."
-            # Mock de insight generado por el motor de deducción
-            insight = "💡 Insight: Detecté 3 gastos deducibles no registrados en tu contabilidad."
-            
-            return f"{summary}\n{insight}"
+            self._call_api("/sync", "POST", {"tipo": "recibidos"})
+            self._call_api("/sync/check", "POST")
+            return "⏳ He solicitado la descarga de tus CFDIs al SAT. Tardará unos minutos. Puedes revisar el progreso en la Mini App."
         except Exception as e:
-            logger.error(f"Error en descarga de CFDIs: {e}")
-            return f"Error al procesar CFDIs: {str(e)}"
+            return f"Error al iniciar descarga: {str(e)}"
 
     def execute_compliance_check(self) -> str:
         """
-        Consulta la opinión de cumplimiento y genera alerta si es negativa.
+        Consulta la opinión de cumplimiento vía API Railway.
         """
         try:
-            opinion = self.connector.get_compliance_opinion()
+            opinion = self._call_api("/opinion")
+            if "status" in opinion and opinion["status"] == "error":
+                return f"Error: {opinion['message']}"
             
-            if opinion["status"] == "Positiva":
-                return f"✅ Tu opinión de cumplimiento es POSITIVA al {opinion['date']}."
+            status = opinion.get("status", "Desconocido")
+            date = opinion.get("date", "S/D")
+            pending = opinion.get("pending_obligations", 0)
+            
+            if status == "Positiva":
+                return f"✅ Tu opinión de cumplimiento es POSITIVA al {date}."
             else:
-                # Coordinaría con compliance_alerts
-                return f"⚠️ ALERTA: Tu opinión de cumplimiento es NEGATIVA. Tienes {opinion['pending_obligations']} obligaciones pendientes."
+                return f"⚠️ ALERTA: Tu opinión de cumplimiento es NEGATIVA. Tienes {pending} obligaciones pendientes."
         except Exception as e:
-            logger.error(f"Error en consulta de opinión: {e}")
             return f"Error al consultar opinión: {str(e)}"
 
     def execute_status_query(self) -> str:
@@ -89,7 +103,7 @@ class FiscoAgent:
 
     def generate_proactive_notification(self, trigger: str) -> str:
         """
-        Genera una notificación proactiva basada en triggers.
+         la notificación proactiva basada en triggers.
         """
         if trigger == "negative_opinion":
             return "🚨 NOTIFICACIÓN PROACTIVA: Se ha detectado un cambio en tu opinión de cumplimiento. Por favor revisa el portal del SAT."

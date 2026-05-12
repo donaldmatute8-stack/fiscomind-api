@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FiscoMind Mini App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-medium: #16213e;
+            --bg-accent: #0f3460;
+            --accent-purple: #533483;
+            --alert-red: #e94560;
+            --text-light: #e9ecef;
+        }
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: 'Inter', sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .glass-card {
+            background: rgba(22, 33, 62, 0.8);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 1.5rem;
+        }
+        .nav-item.active {
+            color: var(--alert-red);
+            border-bottom: 3px solid var(--alert-red);
+        }
+        .btn-primary {
+            background-color: var(--accent-purple);
+            transition: all 0.2s;
+        }
+        .btn-primary:active {
+            transform: scale(0.95);
+            background-color: #6a4ab7;
+        }
+        .input-dark {
+            background: var(--bg-accent);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: white;
+            border-radius: 0.5rem;
+        }
+        .status-critical { color: var(--alert-red); }
+        .status-high { color: #ffb800; }
+        .status-normal { color: #00dfc4; }
+    </style>
+</head>
+<body class="pb-24">
+
+    <!-- Header -->
+    <header class="p-6 flex justify-between items-center sticky top-0 z-50 bg-opacity-90 backdrop-blur-md">
+        <h1 class="text-2xl font-bold tracking-tight">Fisco<span class="text-red-500">Mind</span></h1>
+        <div id="user-rfc" class="text-xs opacity-60 font-mono">Cargando RFC...</div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="px-4 space-y-6" id="app-content">
+        <!-- Loading State -->
+        <div id="loading-screen" class="flex flex-col items-center justify-center h-64">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-red-500"></div>
+            <p class="mt-4 opacity-60">Sincronizando con el SAT...</p>
+        </div>
+    </main>
+
+    <!-- Bottom Navigation -->
+    <nav class="fixed bottom-0 left-0 right-0 p-4 glass-card mx-4 mb-4 flex justify-around items-center z-50">
+        <button onclick="route('dashboard')" class="nav-item active flex flex-col items-center text-xs space-y-1 transition-all" id="nav-dashboard">
+            <i class="fas fa-chart-pie text-lg"></i>
+            <span>Panel</span>
+        </button>
+        <button onclick="route('cfdis')" class="nav-item flex flex-col items-center text-xs space-y-1 transition-all" id="nav-cfdis">
+            <i class="fas fa-file-invoice-dollar text-lg"></i>
+            <span>CFDIs</span>
+        </button>
+        <button onclick="route('emitir')" class="nav-item flex flex-col items-center text-xs space-y-1 transition-all" id="nav-emitir">
+            <i class="fas fa-plus-circle text-lg"></i>
+            <span>Emitir</span>
+        </button>
+        <button onclick="route('obligaciones')" class="nav-item flex flex-col items-center text-xs space-y-1 transition-all" id="nav-obligaciones">
+            <i class="fas fa-calendar-check text-lg"></i>
+            <span>Calendario</span>
+        </button>
+        <button onclick="route('chat')" class="nav-item flex flex-col items-center text-xs space-y-1 transition-all" id="nav-chat">
+            <i class="fas fa-robot text-lg"></i>
+            <span>IA Fiscal</span>
+        </button>
+    </nav>
+
+    <script>
+        const API_BASE = 'https://fiscomind-api-production.up.railway.app';
+        let state = {
+            rfc: '',
+            lastSync: '',
+            dashboard: {},
+            cfdis: [],
+            obligaciones: []
+        };
+
+        async function api(endpoint, method = 'GET', body = null) {
+            const options = { method, headers: { 'Content-Type': 'application/json' } };
+            if (body) options.body = JSON.stringify(body);
+            const res = await fetch(`${API_BASE}${endpoint}`, options);
+            return res.json();
+        }
+
+        async function init() {
+            try {
+                const dash = await api('/dashboard');
+                state.rfc = dash.rfc;
+                state.dashboard = dash.summary;
+                state.lastSync = dash.last_sync;
+                document.getElementById('user-rfc').innerText = state.rfc;
+                route('dashboard');
+            } catch (e) {
+                console.error(e);
+                document.getElementById('app-content').innerHTML = `<div class="p-10 text-center text-red-400">Error de conexión con el API Railway.</div>`;
+            }
+        }
+
+        function route(page) {
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`nav-${page}`).classList.add('active');
+            
+            const content = document.getElementById('app-content');
+            
+            if (page === 'dashboard') renderDashboard(content);
+            else if (page === 'cfdis') renderCFDIs(content);
+            else if (page === 'emitir') renderEmitir(content);
+            else if (page === 'obligaciones') renderObligaciones(content);
+            else if (page === 'chat') renderChat(content);
+        }
+
+        function renderDashboard(container) {
+            const s = state.dashboard;
+            container.innerHTML = `
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="glass-card p-4 flex flex-col justify-between">
+                        <span class="text-xs opacity-60">Ingresos</span>
+                        <span class="text-xl font-bold text-green-400">$${s.total_ingresos.toLocaleString()}</span>
+                    </div>
+                    <div class="glass-card p-4 flex flex-col justify-between">
+                        <span class="text-xs opacity-60">Egresos</span>
+                        <span class="text-xl font-bold text-red-400">$${s.total_egresos.toLocaleString()}</span>
+                    </div>
+                    <div class="glass-card p-4 flex flex-col justify-between">
+                        <span class="text-xs opacity-60">Ahorro ISR</span>
+                        <span class="text-xl font-bold text-blue-400">$${s.ahorro_isr_estimado.toLocaleString()}</span>
+                    </div>
+                    <div class="glass-card p-4 flex flex-col justify-between">
+                        <span class="text-xs opacity-60">Deducibles</span>
+                        <span class="text-xl font-bold text-purple-400">${s.deducibles_count} docs</span>
+                    </div>
+                </div>
+
+                <div class="glass-card p-6">
+                    <h3 class="text-lg font-semibold mb-4">Flujo Fiscal</h3>
+                    <canvas id="mainChart" class="w-full h-48"></canvas>
+                </div>
+
+                <div class="glass-card p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-semibold">Últimos Movimientos</h3>
+                        <button onclick="syncSAT()" class="text-xs btn-primary px-3 py-1 rounded-full">Sincronizar</button>
+                    </div>
+                    <div id="recent-list" class="space-y-3 text-sm">
+                        <p class="opacity-40 text-center py-4">Cargando...</p>
+                    </div>
+                </div>
+            `;
+            
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Ingresos', 'Egresos', 'Emitidos'],
+                    datasets: [{
+                        data: [s.total_ingresos, s.total_egresos, s.total_emitido_monto],
+                        backgroundColor: ['#4ade80', '#f87171', '#818cf8']
+                    }]
+                },
+                options: { plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#aaa' } } } }
+            });
+
+            api('/cfdis').then(data => {
+                const list = document.getElementById('recent-list');
+                list.innerHTML = data.cfdis.slice(0, 5).map(c => `
+                    <div class="flex justify-between items-center p-3 bg-white/5 rounded-lg">
+                        <div>
+                            <div class="font-medium">${c.emisor || 'S/E'}</div>
+                            <div class="text-xs opacity-50">${c.fecha_emision}</div>
+                        </div>
+                        <div class="font-bold ${c.efecto === 'I' ? 'text-green-400' : 'text-red-400'}">
+                            ${c.efecto === 'I' ? '+' : '-'}$${c.monto}
+                        </div>
+                    </div>
+                `).join('') || '<p class="opacity-40 text-center">No hay datos recientes</p>';
+            });
+        }
+
+        async function syncSAT() {
+            const btn = event.target;
+            btn.innerText = 'Sincronizando...';
+            btn.disabled = true;
+            try {
+                await api('/sync', 'POST');
+                await api('/sync/check', 'POST');
+                await init();
+            } catch (e) { alert('Error al sincronizar'); }
+            btn.innerText = 'Sincronizar';
+            btn.disabled = false;
+        }
+
+        function renderCFDIs(container) {
+            container.innerHTML = `
+                <div class="glass-card p-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <h3 class="text-xl font-bold">Mis CFDIs</h3>
+                        <select id="filter-tipo" onchange="loadCFDIs()" class="input-dark text-xs p-2">
+                            <option value="all">Todos</option>
+                            <option value="recibidos">Recibidos</option>
+                            <option value="emitidos">Emitidos</option>
+                        </select>
+                    </div>
+                    <div id="cfdi-list" class="space-y-3">
+                        <p class="opacity-40 text-center py-10">Cargando documentos...</p>
+                    </div>
+                </div>
+            `;
+            loadCFDIs();
+        }
+
+        async function loadCFDIs() {
+            const tipo = document.getElementById('filter-tipo').value;
+            const data = await api(`/cfdis?tipo=${tipo}`);
+            const list = document.getElementById('cfdi-list');
+            list.innerHTML = data.cfdis.map(c => `
+                <div class="p-4 bg-white/5 rounded-xl border border-white/10 flex justify-between items-center">
+                    <div>
+                        <div class="font-bold">${c.emisor || 'S/E'}</div>
+                        <div class="text-xs opacity-50">${c.fecha_emision} | ${c.uuid.substring(0,8)}...</div>
+                    </div>
+                    <div class="text-right">
+                        <div class="font-bold ${c.efecto === 'I' ? 'text-green-400' : 'text-red-400'}">$${c.monto}</div>
+                        <div class="text-[10px] uppercase opacity-50">${c.estatus === '1' ? 'Vigente' : 'Cancelado'}</div>
+                    </div>
+                </div>
+            `).join('') || '<p class="text-center opacity-40 py-10">No se encontraron CFDIs</p>';
+        }
+
+        function renderEmitir(container) {
+            container.innerHTML = `
+                <div class="glass-card p-6 space-y-6">
+                    <h3 class="text-xl font-bold mb-4">Emitir Nueva Factura</h3>
+                    
+                    <div class="space-y-4">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="text-xs opacity-60 block mb-1">Tipo Comprobante</label>
+                                <select id="tipo_comp" class="input-dark w-full p-2 text-sm">
+                                    <option value="I">Ingreso</option>
+                                    <option value="E">Egreso</option>
+                                    <option value="T">Traslado</option>
+                                    <option value="P">Pago</option>
+                                    <option value="N">Nómina</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-xs opacity-60 block mb-1">Uso CFDI</label>
+                                <select id="uso_cfdi" class="input-dark w-full p-2 text-sm">
+                                    <option value="G03">Gastos en General</option>
+                                    <option value="P01">Por definir</option>
+                                    <option value="I01">Sin efectos fiscales</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="p-4 bg-white/5 rounded-xl space-y-3 border border-white/10">
+                            <div class="text-xs font-bold text-red-400 uppercase">Datos Receptor</div>
+                            <input id="rec_rfc" type="text" placeholder="RFC Receptor" class="input-dark w-full p-2 text-sm">
+                            <input id="rec_nombre" type="text" placeholder="Nombre o Razón Social" class="input-dark w-full p-2 text-sm">
+                            <div class="grid grid-cols-2 gap-2">
+                                <input id="rec_cp" type="text" placeholder="CP" class="input-dark w-full p-2 text-sm">
+                                <input id="rec_regimen" type="text" placeholder="Régimen (Clave)" class="input-dark w-full p-2 text-sm">
+                            </div>
+                        </div>
+
+                        <div class="p-4 bg-white/5 rounded-xl space-y-3 border border-white/10">
+                            <div class="text-xs font-bold text-red-400 uppercase">Pago y Moneda</div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <select id="forma_pago" class="input-dark w-full p-2 text-sm">
+                                    <option value="01">01 - Efectivo</option>
+                                    <option value="03">03 - Transferencia</option>
+                                    <option value="04">04 - Tarjeta</option>
+                                </select>
+                                <select id="metodo_pago" class="input-dark w-full p-2 text-sm">
+                                    <option value="PUE">PUE (Una sola exhibición)</option>
+                                    <option value="PPD">PPD (Parcialidades)</option>
+                                </select>
+                            </div>
+                            <select id="moneda" class="input-dark w-full p-2 text-sm">
+                                <option value="MXN">MXN - Peso Mexicano</option>
+                                <option value="USD">USD - Dólar</option>
+                                <option value="EUR">EUR - Euro</option>
+                            </select>
+                        </div>
+
+                        <div class="p-4 bg-white/5 rounded-xl space-y-3 border border-white/10">
+                            <div class="flex justify-between items-center">
+                                <div class="text-xs font-bold text-red-400 uppercase">Conceptos</div>
+                                <button onclick="addConceptRow()" class="text-xs text-blue-400">+ Agregar</button>
+                            </div>
+                            <div id="conceptos-list" class="space-y-2">
+                                <!-- Rows will be added here -->
+                            </div>
+                        </div>
+
+                        <div class="p-4 bg-white/10 rounded-xl flex justify-between items-center">
+                            <span class="text-lg font-bold">Total:</span>
+                            <span id="total-display" class="text-2xl font-black text-red-400">$0.00</span>
+                        </div>
+
+                        <button onclick="submitFactura()" class="btn-primary w-full p-4 rounded-xl font-bold text-lg">
+                            Emitir Factura
+                        </button>
+                    </div>
+                </div>
+            `;
+            addConceptRow();
+        }
+
+        function addConceptRow() {
+            const container = document.getElementById('conceptos-list');
+            const id = Date.now();
+            const row = document.createElement('div');
+            row.className = 'p-3 bg-white/5 rounded-lg border border-white/10 space-y-2 relative';
+            row.id = `row-${id}`;
+            row.innerHTML = `
+                <button onclick="document.getElementById('row-${id}').remove(); calculateTotal();" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 text-xs">x</button>
+                <input type="text" placeholder="Descripción" class="input-dark w-full p-2 text-xs" oninput="calculateTotal()">
+                <div class="grid grid-cols-3 gap-2">
+                    <input type="number" placeholder="Cant" class="input-dark p-2 text-xs concept-qty" oninput="calculateTotal()">
+                    <input type="number" placeholder="Precio" class="input-dark p-2 text-xs concept-price" oninput="calculateTotal()">
+                    <select class="input-dark p-2 text-xs concept-tax" onchange="calculateTotal()">
+                        <option value="0.16">IVA 16%</option>
+                        <option value="0">Exento</option>
+                        <option value="0.08">IVA 8%</option>
+                    </select>
+                </div>
+            `;
+            container.appendChild(row);
+        }
+
+        function calculateTotal() {
+            let total = 0;
+            document.querySelectorAll('#conceptos-list > div').forEach(row => {
+                const qty = parseFloat(row.querySelector('.concept-qty').value) || 0;
+                const price = parseFloat(row.querySelector('.concept-price').value) || 0;
+                const tax = parseFloat(row.querySelector('.concept-tax').value) || 0;
+                total += (qty * price) * (1 + tax);
+            });
+            document.getElementById('total-display').innerText = `$${total.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+            return total;
+        }
+
+        async function submitFactura() {
+            const data = {
+                tipo: document.getElementById('tipo_comp').value,
+                uso: document.getElementById('uso_cfdi').value,
+                receptor: {
+                    rfc: document.getElementById('rec_rfc').value,
+                    nombre: document.getElementById('rec_nombre').value,
+                    cp: document.getElementById('rec_cp').value,
+                    regimen: document.getElementById('rec_regimen').value,
+                },
+                pago: {
+                    forma: document.getElementById('forma_pago').value,
+                    metodo: document.getElementById('metodo_pago').value,
+                    moneda: document.getElementById('moneda').value,
+                },
+                total: calculateTotal()
+            };
+            
+            try {
+                const res = await api('/emitir', 'POST', data);
+                alert(`Estado: ${res.status}. ${res.message}`);
+            } catch (e) { alert('Error al emitir factura'); }
+        }
+
+        function renderObligaciones(container) {
+            container.innerHTML = `
+                <div class="glass-card p-6">
+                    <h3 class="text-xl font-bold mb-6">Calendario Fiscal</h3>
+                    <div id="obl-list" class="space-y-4">
+                        <p class="opacity-40 text-center py-10">Cargando obligaciones...</p>
+                    </div>
+                </div>
+            `;
+            api('/obligaciones').then(data => {
+                const list = document.getElementById('obl-list');
+                list.innerHTML = data.obligaciones_pendientes.map(o => `
+                    <div class="p-4 bg-white/5 rounded-xl border-l-4 ${o.urgencia === 'critical' ? 'border-red-500' : o.urgencia === 'high' ? 'border-yellow-500' : 'border-green-500'}">
+                        <div class="flex justify-between items-start">
+                            <div class="font-bold">${o.titulo}</div>
+                            <div class="text-[10px] font-bold uppercase px-2 py-1 rounded bg-white/10 status-${o.urgencia}">
+                                ${o.urgencia}
+                            </div>
+                        </div>
+                        <div class="text-xs opacity-60 mt-1">Vence: ${o.vence}</div>
+                        <div class="text-sm mt-2">${o.descripcion}</div>
+                        <div class="mt-3 text-xs font-bold text-red-400">
+                            <i class="fas fa-clock mr-1"></i> ${o.dias_restantes} días restantes
+                        </div>
+                    </div>
+                `).join('') || '<p class="text-center opacity-40 py-10">Estás al corriente con todo. 🎉</p>';
+            });
+        }
+
+        function renderChat(container) {
+            container.innerHTML = `
+                <div class="glass-card p-6 h-[70vh] flex flex-col">
+                    <div id="chat-messages" class="flex-1 overflow-y-auto space-y-4 mb-4 pr-2 text-sm">
+                        <div class="bg-white/10 p-3 rounded-lg max-w-[80%]">
+                            Hola Marco. Soy tu IA Fiscal. ¿En qué puedo ayudarte hoy con tus impuestos o CFDIs?
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                        <input id="chat-input" type="text" placeholder="Pregunta sobre tus impuestos..." class="input-dark flex-1 p-3 text-sm">
+                        <button onclick="sendChatMessage()" class="btn-primary px-4 rounded-lg">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function sendChatMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const msgDiv = document.getElementById('chat-messages');
+            msgDiv.innerHTML += `<div class="bg-purple-600 p-3 rounded-lg max-w-[80%] ml-auto text-right">${text}</div>`;
+            input.value = '';
+
+            // Simulation for Chat Fiscal based on Railway API
+            // In real scenario, this would hit an LLM endpoint with Railway context
+            const response = await new Promise(res => setTimeout(() => res(`Analizando tus CFDIs... Basado en tus ${state.dashboard.total_recibidos} recibidos, sugiero revisar los conceptos de ${state.dashboard.total_deducible} para optimizar tu ISR.`), 1000));
+            
+            msgDiv.innerHTML += `<div class="bg-white/10 p-3 rounded-lg max-w-[80%]">${response}</div>`;
+            msgDiv.scrollTop = msgDiv.scrollHeight;
+        }
+
+        init();
+    </script>
+</body>
+</html>
