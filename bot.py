@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8707174381:AAEMPvzE-j123z1bETTZEDDtJCURiE--yiI")
 API = os.environ.get("FISCOMIND_API_URL", "https://fiscomind-api-production.up.railway.app")
-WEBAPP = os.environ.get("FISCOMIND_WEBAPP_URL", "https://fiscomind.vercel.app")
+WEBAPP = os.environ.get("FISCOMIND_WEBAPP_URL", "https://miniapp-react-livid.vercel.app")
 
 client = httpx.Client(base_url=API, timeout=30)
 
