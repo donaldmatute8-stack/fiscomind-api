@@ -1,10 +1,12 @@
 """
 Facturama PAC Integration Routes
 Real CFDI emission, cancellation, and payment complements
+Uses Basic Auth (username/password) per Facturama docs
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 import os
 import logging
+import io
 from typing import Dict, Any
 
 # Import the service
@@ -17,6 +19,38 @@ facturama_bp = Blueprint('facturama', __name__)
 
 # Initialize service
 facturama_service = FacturamaService()
+
+
+@facturama_bp.route('/status')
+def facturama_status():
+    """Check Facturama service status"""
+    try:
+        is_connected = facturama_service.test_connection()
+        
+        if is_connected:
+            # Get account info
+            info = facturama_service.get_account_info()
+            return jsonify({
+                "status": "connected",
+                "mode": "sandbox" if facturama_service.is_sandbox else "production",
+                "account": info.get('Name', 'Unknown'),
+                "rfc": info.get('Rfc', 'Unknown'),
+                "message": "Facturama service is ready"
+            })
+        else:
+            return jsonify({
+                "status": "disconnected",
+                "mode": "sandbox" if facturama_service.is_sandbox else "production",
+                "message": "Facturama service unavailable. Check credentials.",
+                "help": "Set FACTURAMA_USERNAME and FACTURAMA_PASSWORD environment variables"
+            }), 503
+        
+    except Exception as e:
+        logger.error(f"Status check error: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 @facturama_bp.route('/emitir-real', methods=['POST'])
@@ -40,16 +74,14 @@ def emitir_real():
                 "quantity": 1
             }
         ],
-        "payment_form": "03",  // Transferencia
-        "payment_method": "PUE", // Pago único o PPD
-        "serie": "A",
-        "folio": "1"
+        "payment_form": "03",
+        "payment_method": "PUE"
     }
     """
     data = request.json or {}
     
     try:
-        # Transform data to Facturama format
+        # Validate required fields
         receiver_data = data.get('receiver', {})
         items = data.get('items', [])
         
@@ -59,11 +91,17 @@ def emitir_real():
                 "message": "receiver and items are required"
             }), 400
         
-        # Build Facturama payload
+        if not receiver_data.get('name') or not receiver_data.get('rfc'):
+            return jsonify({
+                "status": "error", 
+                "message": "Receiver name and RFC are required"
+            }), 400
+        
+        # Build Facturama v2 API payload
         facturama_payload = {
             "Receiver": {
                 "Name": receiver_data.get('name'),
-                "Rfc": receiver_data.get('rfc'),
+                "Rfc": receiver_data.get('rfc').upper(),
                 "CfdiUse": receiver_data.get('cfdi_use', 'G03'),
                 "FiscalRegime": receiver_data.get('regime', '601'),
                 "TaxZipCode": receiver_data.get('tax_zip', '64000')
@@ -75,18 +113,15 @@ def emitir_real():
                     "UnitCode": item.get('unit_code', 'E48'),
                     "UnitPrice": float(item.get('unit_price', 0)),
                     "Quantity": float(item.get('quantity', 1)),
-                    "Subtotal": float(item.get('unit_price', 0)) * float(item.get('quantity', 1)),
-                    "TaxObject": "02"
+                    "TaxObject": "02"  # Sí objeto de impuesto
                 }
                 for item in items
             ],
             "PaymentForm": data.get('payment_form', '03'),
             "PaymentMethod": data.get('payment_method', 'PUE'),
-            "ExpeditionPlace": data.get('expedition_place', '64000'),
+            "ExpeditionPlace": data.get('expedition_place', receiver_data.get('tax_zip', '64000')),
             "Currency": "MXN",
-            "ExchangeRate": 1,
-            "Serie": data.get('serie', ''),
-            "Folio": data.get('folio', '')
+            "ExchangeRate": 1
         }
         
         # Emit via Facturama
@@ -99,22 +134,7 @@ def emitir_real():
                 "details": result.get('details')
             }), 400
         
-        return jsonify({
-            "status": "success",
-            "message": "CFDI emitido correctamente",
-            "cfdi": {
-                "id": result.get('Id'),
-                "uuid": result.get('Complement', {}).get('TaxStamp', {}).get('Uuid'),
-                "cfdi_type": result.get('CfdiType'),
-                "total": result.get('Total'),
-                "status": result.get('Status'),
-                "pdf_url": f"/facturama/download/{result.get('Id')}/pdf",
-                "xml_url": f"/facturama/download/{result.get('Id')}/xml",
-                "qr_code": result.get('Complement', {}).get('TaxStamp', {}).get('QrCode'),
-                "date": result.get('Date'),
-                "original_string": result.get('OriginalString')
-            }
-        })
+        return jsonify(result)
         
     except Exception as e:
         logger.error(f"Error emitting CFDI: {e}", exc_info=True)
@@ -131,11 +151,13 @@ def cancelar_real(cfdi_id):
     
     Query params:
     - reason: Cancellation reason (01, 02, 03, 04)
+    - uuid_replacement: Required if reason is 01
     """
     reason = request.args.get('reason', '02')
+    uuid_replacement = request.args.get('uuid_replacement', '')
     
     try:
-        result = facturama_service.cancel_cfdi(cfdi_id, reason)
+        result = facturama_service.cancel_cfdi(cfdi_id, reason, uuid_replacement)
         
         if result.get('status') == 'error':
             return jsonify({
@@ -143,116 +165,10 @@ def cancelar_real(cfdi_id):
                 "message": result.get('message')
             }), 400
         
-        return jsonify({
-            "status": "success",
-            "message": "CFDI cancelado correctamente",
-            "cancelled_cfdi": cfdi_id,
-            "uuid": result.get('Uuid'),
-            "acknowledgment": result.get('Acuse')
-        })
+        return jsonify(result)
         
     except Exception as e:
         logger.error(f"Error cancelling CFDI: {e}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-
-@facturama_bp.route('/complemento-pago-real', methods=['POST'])
-def complemento_pago_real():
-    """
-    Emit a REAL Complemento de Pago via Facturama
-    
-    Expected JSON:
-    {
-        "receiver": {
-            "name": "BENITOS SA DE CV",
-            "rfc": "BEN123456789",
-            "tax_zip": "64000"
-        },
-        "payment_date": "2024-01-15",
-        "payment_form": "03",  // Transferencia
-        "amount": 10000.00,
-        "related_documents": [
-            {
-                "uuid": "...",  // UUID of original invoice
-                "payment_method": "PPD",
-                "partiality_number": 1,
-                "previous_amount": 20000.00,
-                "amount_paid": 10000.00,
-                "outstanding_balance": 10000.00
-            }
-        ]
-    }
-    """
-    data = request.json or {}
-    
-    try:
-        receiver = data.get('receiver', {})
-        related_docs = data.get('related_documents', [])
-        
-        if not receiver or not related_docs:
-            return jsonify({
-                "status": "error",
-                "message": "receiver and related_documents are required"
-            }), 400
-        
-        # Build Facturama payload for complemento de pago
-        facturama_payload = {
-            "CfdiType": "P",
-            "Receiver": {
-                "Name": receiver.get('name'),
-                "Rfc": receiver.get('rfc'),
-                "CfdiUse": "CP01",
-                "FiscalRegime": receiver.get('regime', '601'),
-                "TaxZipCode": receiver.get('tax_zip', '64000')
-            },
-            "PaymentForm": data.get('payment_form', '03'),
-            "PaymentMethod": "PUE",  // Payment receipts are always PUE
-            "ExpeditionPlace": data.get('expedition_place', '64000'),
-            "Currency": "MXN",
-            "ExchangeRate": 1,
-            "RelatedDocuments": [
-                {
-                    "Uuid": doc.get('uuid'),
-                    "PaymentMethod": doc.get('payment_method', 'PPD'),
-                    "PartialityNumber": doc.get('partiality_number', 1),
-                    "PreviousAmount": float(doc.get('previous_amount', 0)),
-                    "AmountPaid": float(doc.get('amount_paid', 0)),
-                    "OutstandingBalance": float(doc.get('outstanding_balance', 0))
-                }
-                for doc in related_docs
-            ]
-        }
-        
-        result = facturama_service.emit_cfdi(facturama_payload)
-        
-        if result.get('status') == 'error':
-            return jsonify({
-                "status": "error",
-                "message": result.get('message'),
-                "details": result.get('details')
-            }), 400
-        
-        return jsonify({
-            "status": "success",
-            "message": "Complemento de pago emitido correctamente",
-            "complemento": {
-                "id": result.get('Id'),
-                "uuid": result.get('Complement', {}).get('TaxStamp', {}).get('Uuid'),
-                "type": "P",
-                "total": result.get('Total'),
-                "date": result.get('Date'),
-                "pdf_url": f"/facturama/download/{result.get('Id')}/pdf",
-                "xml_url": f"/facturama/download/{result.get('Id')}/xml",
-                "qr_code": result.get('Complement', {}).get('TaxStamp', {}).get('QrCode'),
-                "related_documents": related_docs
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"Error emitting complemento de pago: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -265,14 +181,17 @@ def download_cfdi(cfdi_id: str, format_type: str):
     Download CFDI PDF or XML
     
     format_type: 'pdf' or 'xml'
+    cfdi_type: 'issued' or 'received' (from query param, default 'issued')
     """
+    cfdi_type = request.args.get('type', 'issued')
+    
     try:
         if format_type == 'pdf':
-            content = facturama_service.download_pdf(cfdi_id)
+            content = facturama_service.download_pdf(cfdi_id, cfdi_type)
             mimetype = 'application/pdf'
             extension = 'pdf'
         elif format_type == 'xml':
-            content = facturama_service.download_xml(cfdi_id)
+            content = facturama_service.download_xml(cfdi_id, cfdi_type)
             mimetype = 'application/xml'
             extension = 'xml'
         else:
@@ -280,9 +199,6 @@ def download_cfdi(cfdi_id: str, format_type: str):
                 "status": "error",
                 "message": "Invalid format type. Use 'pdf' or 'xml'"
             }), 400
-        
-        from flask import send_file
-        import io
         
         return send_file(
             io.BytesIO(content),
@@ -303,8 +219,15 @@ def download_cfdi(cfdi_id: str, format_type: str):
 def list_cfdis():
     """List emitted CFDIs from Facturama"""
     try:
-        rfcs = request.args.getlist('rfc')
-        result = facturama_service.list_cfdis(rfcs if rfcs else None)
+        keyword = request.args.get('keyword', '')
+        cfdi_type = request.args.get('type', 'issued')
+        status = request.args.get('status', 'all')
+        page = request.args.get('page', 1, type=int)
+        
+        result = facturama_service.list_cfdis(keyword, cfdi_type, status, page)
+        
+        if result.get('status') == 'error':
+            return jsonify(result), 400
         
         return jsonify({
             "status": "success",
@@ -319,20 +242,59 @@ def list_cfdis():
         }), 500
 
 
-@facturama_bp.route('/status')
-def facturama_status():
-    """Check Facturama service status"""
+@facturama_bp.route('/detail/<cfdi_id>')
+def get_cfdi_detail(cfdi_id):
+    """Get CFDI detail"""
     try:
-        from facturama_service import test_connection
-        is_connected = test_connection()
+        cfdi_type = request.args.get('type', 'issued')
+        result = facturama_service.get_cfdi_detail(cfdi_id, cfdi_type)
+        
+        if result.get('status') == 'error':
+            return jsonify(result), 400
         
         return jsonify({
-            "status": "connected" if is_connected else "disconnected",
-            "mode": "sandbox" if os.environ.get('FACTURAMA_SANDBOX', 'true').lower() == 'true' else "production",
-            "message": "Facturama service is ready" if is_connected else "Facturama service unavailable"
+            "status": "success",
+            "cfdi": result
         })
         
     except Exception as e:
+        logger.error(f"Error getting CFDI detail: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+@facturama_bp.route('/send-email', methods=['POST'])
+def send_cfdi_email():
+    """Send CFDI by email"""
+    data = request.json or {}
+    
+    try:
+        cfdi_id = data.get('cfdi_id')
+        email = data.get('email')
+        subject = data.get('subject', '')
+        comments = data.get('comments', '')
+        cfdi_type = data.get('type', 'issued')
+        
+        if not cfdi_id or not email:
+            return jsonify({
+                "status": "error",
+                "message": "cfdi_id and email are required"
+            }), 400
+        
+        result = facturama_service.send_cfdi_email(cfdi_id, email, subject, comments, cfdi_type)
+        
+        if result.get('status') == 'error':
+            return jsonify(result), 400
+        
+        return jsonify({
+            "status": "success",
+            "message": "Email sent successfully"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error sending email: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e)
