@@ -23,7 +23,7 @@ app = Flask(__name__)
 CORS(app, origins=["*"], supports_credentials=True)
 
 # Data directory (persistente en Railway)
-DATA_DIR = Path('/data')
+DATA_DIR = Path(os.environ.get('DATA_DIR', '/tmp/fiscomind-data'))
 DATA_DIR.mkdir(exist_ok=True, parents=True)
 
 # In-memory storage for demo (reemplazar con DB en producción)
