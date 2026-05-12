@@ -167,7 +167,7 @@ def sync():
             if not auth_ok:
                 return jsonify({"status": "error", "message": "Autenticación FIEL fallida"}), 401
         
-        # Submit async request (returns immediately with ID)
+        # Submit async request
         result = connector.submit_download_request(date_start, date_end, tipo)
         
         if result.get('status') == 'submitted':
@@ -181,6 +181,13 @@ def sync():
                 'submitted': datetime.now().isoformat()
             }
             save_cache(cache)
+        elif result.get('status') == 'error' and '301' in str(result.get('cod_status', '')):
+            # Try with smaller range if SAT rejects
+            return jsonify({
+                "status": "error",
+                "message": "SAT rechazó la solicitud (rango muy grande). Intenta un rango de 1-7 días.",
+                "sat_error": result
+            }), 422
         
         return jsonify(result)
         

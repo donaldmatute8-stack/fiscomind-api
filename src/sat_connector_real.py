@@ -84,7 +84,6 @@ class SATConnectorReal:
                                    include_xml: bool = True) -> Dict[str, Any]:
         """
         Submit download request to SAT (async). Returns request ID.
-        Use check_request_status() to poll for results.
         """
         if not self._is_connected:
             if not self.authenticate():
@@ -92,11 +91,13 @@ class SATConnectorReal:
         
         logger.info(f"📥 Submitting download request for {tipo} from {date_start} to {date_end}")
         
+        # Parse dates and create date objects
         start = date.fromisoformat(date_start)
         end = date.fromisoformat(date_end)
         request_type = TipoDescargaMasivaTerceros.CFDI if include_xml else TipoDescargaMasivaTerceros.METADATA
         
         try:
+            # Submit request - SAT API is picky about parameters
             if tipo == "recibidos":
                 result = self.sat.recover_comprobante_received_request(
                     fecha_inicial=start,
@@ -113,36 +114,54 @@ class SATConnectorReal:
                 )
             
             result_dict = to_dict(result)
-            cod_status = result_dict.get('CodEstatus', result_dict.get('cod_estatus'))
-            mensaje = result_dict.get('Mensaje', result_dict.get('mensaje', ''))
-            id_solicitud = result_dict.get('IdSolicitud', result_dict.get('id_solicitud'))
             
-            if not id_solicitud:
-                return {
-                    "status": "error" if cod_status else "empty",
-                    "cod_status": cod_status,
-                    "message": mensaje
+            # Try different field names that satcfdi might return
+            cod_status = (result_dict.get('CodEstatus') or 
+                         result_dict.get('cod_estatus') or 
+                         result_dict.get('codigo'))
+            mensaje = (result_dict.get('Mensaje') or 
+                      result_dict.get('mensaje') or 
+                      result_dict.get('mensaje_error', ''))
+            id_solicitud = (result_dict.get('IdSolicitud') or 
+                           result_dict.get('id_solicitud') or
+                           result_dict.get('solicitud_id'))
+            
+            logger.info(f"📨 SAT Response: {cod_status} - {mensaje}")
+            
+            # Status 5000 = Accepted, 5004 = No CFDIs found
+            if cod_status in ['5000', 5000] and id_solicitud:
+                # Store for later polling
+                self._pending_requests[id_solicitud] = {
+                    'id': id_solicitud,
+                    'submitted': datetime.now().isoformat(),
+                    'date_start': date_start,
+                    'date_end': date_end,
+                    'tipo': tipo,
+                    'cod_status': cod_status,
+                    'mensaje': mensaje
                 }
-            
-            # Store for later polling
-            self._pending_requests[id_solicitud] = {
-                'id': id_solicitud,
-                'submitted': datetime.now().isoformat(),
-                'date_start': date_start,
-                'date_end': date_end,
-                'tipo': tipo,
-                'cod_status': cod_status,
-                'mensaje': mensaje
-            }
-            
-            return {
-                "status": "submitted",
-                "id_solicitud": id_solicitud,
-                "cod_status": cod_status,
-                "message": mensaje,
-                "tipo": tipo,
-                "date_range": f"{date_start} to {date_end}"
-            }
+                
+                return {
+                    "status": "submitted",
+                    "id_solicitud": id_solicitud,
+                    "cod_status": cod_status,
+                    "message": mensaje,
+                    "tipo": tipo,
+                    "date_range": f"{date_start} to {date_end}"
+                }
+            elif cod_status in ['5004', 5004]:
+                return {
+                    "status": "empty",
+                    "message": "No CFDIs found for this period",
+                    "cod_status": cod_status
+                }
+            else:
+                return {
+                    "status": "error",
+                    "cod_status": cod_status,
+                    "message": mensaje,
+                    "raw_response": result_dict
+                }
             
         except Exception as e:
             logger.error(f"Submit download request failed: {e}", exc_info=True)
