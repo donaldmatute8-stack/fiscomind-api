@@ -165,7 +165,9 @@ def sync():
             if not auth_ok:
                 return jsonify({"status": "error", "message": "Autenticación FIEL fallida. Verifica credenciales del vault."}), 401
         
-        # Download recibidos
+        wait = data.get('wait', True)  # By default, long-poll until SAT finishes
+        
+        # Download recibidos (long-poll by default)
         logger.info(f"📥 Syncing recibidos: {date_start} to {date_end}")
         recibidos = connector.download_cfdis(date_start, date_end, tipo="recibidos")
         
@@ -173,21 +175,43 @@ def sync():
         logger.info(f"📤 Syncing emitidos: {date_start} to {date_end}")
         emitidos = connector.download_cfdis(date_start, date_end, tipo="emitidos")
         
+        # Save pending requests for later checking
+        pending = dict(connector._pending_requests)
+        
         # Update cache
         cache = load_cache()
         cache['last_sync'] = datetime.now().isoformat()
         cache['last_date_start'] = date_start
         cache['last_date_end'] = date_end
-        cache['recibidos'] = recibidos
-        cache['emitidos'] = emitidos
+        if recibidos:
+            cache['recibidos'] = recibidos
+        if emitidos:
+            cache['emitidos'] = emitidos
         save_cache(cache)
         
+        total_r = len(recibidos)
+        total_e = len(emitidos)
+        
+        if total_r > 0 or total_e > 0:
+            msg = f"Sincronización completada: {total_r} recibidos, {total_e} emitidos"
+            status = "success"
+        elif pending:
+            msg = f"SAT procesando solicitud. {len(pending)} pendientes. Consulta GET /sync/status"
+            status = "pending"
+            # Store pending request IDs for later polling
+            cache['pending_requests'] = {k: v for k, v in pending.items()}
+            save_cache(cache)
+        else:
+            msg = f"Sincronización completada sin CFDIs nuevos para el período"
+            status = "success"
+        
         return jsonify({
-            "status": "success",
-            "message": f"Sincronización completada: {len(recibidos)} recibidos, {len(emitidos)} emitidos",
+            "status": status,
+            "message": msg,
             "date_range": f"{date_start} to {date_end}",
-            "recibidos_count": len(recibidos),
-            "emitidos_count": len(emitidos),
+            "recibidos_count": total_r,
+            "emitidos_count": total_e,
+            "pending_requests": len(pending),
             "last_sync": cache['last_sync']
         })
         
@@ -197,19 +221,49 @@ def sync():
 
 @app.route('/sync/status')
 def sync_status():
-    """Check pending SAT requests"""
+    """Check pending SAT requests and try to download if ready"""
     connector = sat_connector()
-    if not connector:
-        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
-    
-    pending = connector._pending_requests if connector else {}
     cache = load_cache()
+    
+    pending_ids = cache.get('pending_requests', {})
+    newly_downloaded = []
+    
+    # Try to check/download any pending requests
+    if connector and pending_ids:
+        try:
+            if not connector._is_connected:
+                connector.authenticate()
+            
+            for req_id in list(pending_ids.keys()):
+                try:
+                    status = connector.sat.recover_comprobante_status(req_id)
+                    estado = status.get('EstadoSolicitud')
+                    
+                    if estado == 3:  # FINISHED
+                        cfdis = connector._download_packages(status)
+                        newly_downloaded.extend(cfdis)
+                        del pending_ids[req_id]
+                        logger.info(f"✅ Downloaded {len(cfdis)} CFDIs from pending request {req_id}")
+                    elif estado in [4, 5]:  # ERROR or REJECTED
+                        del pending_ids[req_id]
+                        logger.warning(f"Request {req_id} finished with state {estado}")
+                except Exception as e:
+                    logger.error(f"Error checking request {req_id}: {e}")
+        except Exception as e:
+            logger.error(f"Auth error in sync/status: {e}")
+    
+    # Update cache with new CFDIs
+    if newly_downloaded:
+        cache['recibidos'].extend(newly_downloaded)
+        cache['pending_requests'] = pending_ids
+        cache['last_sync'] = datetime.now().isoformat()
+        save_cache(cache)
     
     return jsonify({
         "connected": connector._is_connected if connector else False,
         "last_sync": cache.get('last_sync'),
-        "pending_requests": len(pending),
-        "requests": {k: {kk: str(vv) for kk, vv in v.items()} for k, v in pending.items()},
+        "pending_requests": len(pending_ids),
+        "newly_downloaded": len(newly_downloaded),
         "cache_recibidos": len(cache.get('recibidos', [])),
         "cache_emitidos": len(cache.get('emitidos', []))
     })
