@@ -79,24 +79,24 @@ class SATConnectorReal:
             self._is_connected = False
             return False
     
-    def download_cfdis(self, date_start: str, date_end: str, 
-                       tipo: str = "recibidos",
-                       include_xml: bool = True) -> List[Dict[str, Any]]:
+    def submit_download_request(self, date_start: str, date_end: str, 
+                                   tipo: str = "recibidos",
+                                   include_xml: bool = True) -> Dict[str, Any]:
         """
-        Download CFDIs from SAT portal using descarga masiva.
+        Submit download request to SAT (async). Returns request ID.
+        Use check_request_status() to poll for results.
         """
         if not self._is_connected:
             if not self.authenticate():
                 raise ConnectionError("Could not connect to SAT")
         
-        logger.info(f"📥 Requesting CFDIs {tipo} from {date_start} to {date_end}")
+        logger.info(f"📥 Submitting download request for {tipo} from {date_start} to {date_end}")
         
         start = date.fromisoformat(date_start)
         end = date.fromisoformat(date_end)
         request_type = TipoDescargaMasivaTerceros.CFDI if include_xml else TipoDescargaMasivaTerceros.METADATA
         
         try:
-            # Submit request - simpler, without estado_comprobante
             if tipo == "recibidos":
                 result = self.sat.recover_comprobante_received_request(
                     fecha_inicial=start,
@@ -117,59 +117,113 @@ class SATConnectorReal:
             mensaje = result_dict.get('Mensaje', result_dict.get('mensaje', ''))
             id_solicitud = result_dict.get('IdSolicitud', result_dict.get('id_solicitud'))
             
-            logger.info(f"📨 Request result: {cod_status} - {mensaje}")
-            
             if not id_solicitud:
-                if cod_status in ['5004', 5004] or 'no encontrad' in str(mensaje).lower():
-                    logger.info("No CFDIs found for this period")
-                    return []
-                logger.warning(f"No request ID. Code: {cod_status}, Message: {mensaje}")
-                return []
+                return {
+                    "status": "error" if cod_status else "empty",
+                    "cod_status": cod_status,
+                    "message": mensaje
+                }
             
-            # Poll for completion
-            logger.info(f"⏳ Waiting for SAT to process request {id_solicitud}...")
-            
-            max_wait = 60
-            interval = 5
-            elapsed = 0
-            
-            while elapsed < max_wait:
-                time.sleep(interval)
-                elapsed += interval
-                
-                status = self.sat.recover_comprobante_status(id_solicitud)
-                status_dict = to_dict(status)
-                
-                estado = status_dict.get('EstadoSolicitud', status_dict.get('estado_solicitud'))
-                num_cfdis = status_dict.get('NumeroCFDIs', status_dict.get('numero_cfdis', 0))
-                
-                logger.info(f"  Status: {estado} | CFDIs: {num_cfdis} | Elapsed: {elapsed}s")
-                
-                if estado == self.STATUS_FINISHED:
-                    return self._download_packages(status_dict)
-                elif estado == self.STATUS_REJECTED:
-                    logger.error(f"SAT rejected request: {status_dict.get('Mensaje')}")
-                    return []
-                elif estado == self.STATUS_ERROR:
-                    logger.error(f"SAT error: {status_dict.get('Mensaje')}")
-                    return []
-                elif estado == self.STATUS_ACCEPTED:
-                    continue
-            
-            # Timeout - store for later
-            logger.warning(f"Timeout after {max_wait}s. Storing request {id_solicitud}.")
+            # Store for later polling
             self._pending_requests[id_solicitud] = {
                 'id': id_solicitud,
                 'submitted': datetime.now().isoformat(),
                 'date_start': date_start,
                 'date_end': date_end,
-                'tipo': tipo
+                'tipo': tipo,
+                'cod_status': cod_status,
+                'mensaje': mensaje
             }
-            return []
+            
+            return {
+                "status": "submitted",
+                "id_solicitud": id_solicitud,
+                "cod_status": cod_status,
+                "message": mensaje,
+                "tipo": tipo,
+                "date_range": f"{date_start} to {date_end}"
+            }
             
         except Exception as e:
-            logger.error(f"❌ CFDI download failed: {e}", exc_info=True)
+            logger.error(f"Submit download request failed: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+    
+    def check_request_status(self, id_solicitud: str, download: bool = False) -> Dict[str, Any]:
+        """
+        Check status of a submitted request.
+        If finished and download=True, returns the CFDIs.
+        """
+        if not self._is_connected:
+            if not self.authenticate():
+                return {"status": "error", "message": "Not authenticated"}
+        
+        try:
+            status = self.sat.recover_comprobante_status(id_solicitud)
+            status_dict = to_dict(status)
+            
+            estado = status_dict.get('EstadoSolicitud', status_dict.get('estado_solicitud'))
+            num_cfdis = status_dict.get('NumeroCFDIs', status_dict.get('numero_cfdis', 0))
+            
+            result = {
+                "id_solicitud": id_solicitud,
+                "estado": estado,
+                "num_cfdis": num_cfdis,
+                "finished": estado == self.STATUS_FINISHED,
+                "error": estado in [self.STATUS_ERROR, self.STATUS_REJECTED]
+            }
+            
+            if estado == self.STATUS_FINISHED and download:
+                cfdis = self._download_packages(status_dict)
+                result["cfdis"] = cfdis
+                result["cfdis_count"] = len(cfdis)
+                # Remove from pending
+                if id_solicitud in self._pending_requests:
+                    del self._pending_requests[id_solicitud]
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Check status failed: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+    
+    def download_cfdis(self, date_start: str, date_end: str, 
+                       tipo: str = "recibidos",
+                       include_xml: bool = True) -> List[Dict[str, Any]]:
+        """
+        Download CFDIs from SAT portal using descarga masiva.
+        NOTE: This blocks until SAT finishes processing. For async, use submit_download_request().
+        """
+        submit_result = self.submit_download_request(date_start, date_end, tipo, include_xml)
+        
+        if submit_result.get("status") != "submitted":
+            logger.warning(f"Submit failed: {submit_result}")
             return []
+        
+        id_solicitud = submit_result["id_solicitud"]
+        logger.info(f"⏳ Waiting for SAT to process request {id_solicitud}...")
+        
+        max_wait = 120
+        interval = 5
+        elapsed = 0
+        
+        while elapsed < max_wait:
+            time.sleep(interval)
+            elapsed += interval
+            
+            status = self.check_request_status(id_solicitud, download=True)
+            estado = status.get("estado")
+            
+            logger.info(f"  Status: {estado} | CFDIs: {status.get('num_cfdis', 0)} | Elapsed: {elapsed}s")
+            
+            if status.get("finished"):
+                return status.get("cfdis", [])
+            elif status.get("error"):
+                logger.error(f"SAT error on request {id_solicitud}")
+                return []
+        
+        # Timeout
+        logger.warning(f"Timeout waiting for request {id_solicitud}")
+        return []
     
     def _download_packages(self, status: Dict) -> List[Dict[str, Any]]:
         """Download and parse CFDI packages"""

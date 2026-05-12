@@ -151,44 +151,112 @@ def dashboard():
 
 @app.route('/sync', methods=['POST'])
 def sync():
-    """Sincronizar CFDIs con SAT real usando FIEL del vault"""
+    """Submit download request to SAT (async)"""
     connector = sat_connector()
     if not connector:
-        return jsonify({"status": "error", "message": "SAT connector no disponible. Verifica VAULT_DIR y credenciales."}), 500
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
     
     data = request.json or {}
     date_start = data.get('date_start', (date.today() - timedelta(days=90)).isoformat())
     date_end = data.get('date_end', date.today().isoformat())
+    tipo = data.get('tipo', 'recibidos')  # recibidos o emitidos
     
     try:
-        # Authenticate
         if not connector._is_connected:
-            logger.info("Attempting SAT authentication...")
             auth_ok = connector.authenticate()
             if not auth_ok:
-                return jsonify({
-                    "status": "error", 
-                    "message": "Autenticación FIEL fallida. Verifica credenciales del vault.", 
-                    "vault_dir": str(connector.vault.VAULT_DIR)
-                }), 401
-            logger.info("SAT auth successful")
+                return jsonify({"status": "error", "message": "Autenticación FIEL fallida"}), 401
         
-        # Quick test - just return success if auth works
-        return jsonify({
-            "status": "success",
-            "message": "Autenticación SAT exitosa",
-            "rfc": connector.rfc,
-            "authenticated": True,
-            "note": "CFDI download async - use /sync/status to check"
-        })
+        # Submit async request (returns immediately with ID)
+        result = connector.submit_download_request(date_start, date_end, tipo)
+        
+        if result.get('status') == 'submitted':
+            # Store request in cache for polling
+            cache = load_cache()
+            cache.setdefault('pending_requests', {})[result['id_solicitud']] = {
+                'id_solicitud': result['id_solicitud'],
+                'tipo': tipo,
+                'date_start': date_start,
+                'date_end': date_end,
+                'submitted': datetime.now().isoformat()
+            }
+            save_cache(cache)
+        
+        return jsonify(result)
         
     except Exception as e:
-        logger.error(f"Sync failed: {e}", exc_info=True)
+        logger.error(f"Sync submit failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/sync/check', methods=['POST'])
+def sync_check():
+    """Check status of a request and download CFDIs if ready"""
+    connector = sat_connector()
+    if not connector:
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+    
+    data = request.json or {}
+    id_solicitud = data.get('id_solicitud')
+    
+    if not id_solicitud:
+        # Check all pending requests
+        cache = load_cache()
+        pending = cache.get('pending_requests', {})
+        
+        if not pending:
+            return jsonify({"status": "success", "message": "No pending requests", "pending": 0})
+        
+        results = []
+        for req_id in list(pending.keys()):
+            status = connector.check_request_status(req_id, download=True)
+            results.append(status)
+            
+            if status.get('finished'):
+                # Save CFDIs to cache
+                cfdis = status.get('cfdis', [])
+                if cfdis:
+                    req_info = pending[req_id]
+                    if req_info.get('tipo') == 'recibidos':
+                        cache.setdefault('recibidos', []).extend(cfdis)
+                    else:
+                        cache.setdefault('emitidos', []).extend(cfdis)
+                    cache['last_sync'] = datetime.now().isoformat()
+                del pending[req_id]
+        
+        cache['pending_requests'] = pending
+        save_cache(cache)
+        
         return jsonify({
-            "status": "error", 
-            "message": str(e), 
-            "vault_dir": str(connector.vault.VAULT_DIR) if connector else None
-        }), 500
+            "status": "success",
+            "checked": len(results),
+            "results": results
+        })
+    
+    # Check specific request
+    try:
+        status = connector.check_request_status(id_solicitud, download=True)
+        
+        if status.get('finished'):
+            cache = load_cache()
+            cfdis = status.get('cfdis', [])
+            if cfdis:
+                pending = cache.get('pending_requests', {})
+                req_info = pending.get(id_solicitud, {})
+                if req_info.get('tipo') == 'recibidos':
+                    cache.setdefault('recibidos', []).extend(cfdis)
+                else:
+                    cache.setdefault('emitidos', []).extend(cfdis)
+                if id_solicitud in pending:
+                    del pending[id_solicitud]
+                cache['pending_requests'] = pending
+                cache['last_sync'] = datetime.now().isoformat()
+                save_cache(cache)
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        logger.error(f"Sync check failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/sync/status')
 def sync_status():
