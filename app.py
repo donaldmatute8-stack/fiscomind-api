@@ -242,8 +242,39 @@ def list_emitidos():
 
 @app.route('/emitir', methods=['POST'])
 def emitir():
+    """Register an invoice issued from SAT portal"""
     data = request.json or {}
-    return jsonify({"status": "pending", "message": "Emisión CFDI 4.0 - requiere timbrado SAT gratuito", "data_received": data})
+    
+    # Create invoice record
+    invoice = {
+        'uuid': data.get('uuid') or str(uuid.uuid4()).upper(),
+        'nombre_emisor': data.get('nombre_emisor', 'MARCO ARTURO MUÑOZ DEL TORO'),
+        'rfc_emisor': data.get('rfc_emisor', 'MUTM8610091NA'),
+        'nombre_receptor': data.get('nombre_receptor', ''),
+        'rfc_receptor': data.get('rfc_receptor', ''),
+        'monto': float(data.get('monto', 0)),
+        'fecha_emision': data.get('fecha_emision', date.today().isoformat()),
+        'efecto': 'I',
+        'estatus': '1',
+        'metodo_pago': data.get('metodo_pago', 'PUE'),
+        'forma_pago': data.get('forma_pago', '03'),
+        'uso_cfdi': data.get('uso_cfdi', 'G03'),
+        'complementos': [],
+        'total_pagado': 0 if data.get('metodo_pago') == 'PPD' else float(data.get('monto', 0)),
+        'saldo_pendiente': float(data.get('monto', 0)) if data.get('metodo_pago') == 'PPD' else 0,
+        'fecha_registro': datetime.now().isoformat()
+    }
+    
+    cache = load_cache()
+    cache.setdefault('emitidos', []).append(invoice)
+    save_cache(cache)
+    
+    return jsonify({
+        "status": "success",
+        "message": "Factura registrada",
+        "uuid": invoice['uuid'],
+        "invoice": invoice
+    })
 
 @app.route('/cancelar', methods=['POST'])
 def cancelar():
