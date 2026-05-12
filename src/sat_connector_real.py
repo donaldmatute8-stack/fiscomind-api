@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-SAT Connector Real v3 - Conexión auténtica al SAT usando satcfdi
-Descarga CFDIs reales usando FIEL (e.firma) del vault encriptado
+SAT Connector Real v4 - Exact copy of working local version
+Adapted for Railway (VAULT_DIR env var)
 """
 
 import logging
+import base64
 import time
+import zipfile
+import io
 from datetime import datetime, date, timedelta
 from typing import Dict, Any, List, Optional
 
 from satcfdi.models import Signer
-from satcfdi.pacs.sat import SAT, TipoDescargaMasivaTerceros
+from satcfdi.pacs.sat import SAT, TipoDescargaMasivaTerceros, EstadoComprobante
 
 from secure_vault import Vault
 
@@ -18,25 +21,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sat_connector_real")
 
 
-def to_dict(obj):
-    """Convert satcfdi response to dict"""
-    if isinstance(obj, dict):
-        return obj
-    if hasattr(obj, '__dict__'):
-        return obj.__dict__
-    if hasattr(obj, 'to_dict'):
-        return obj.to_dict()
-    # Fallback: try to parse as dict-like
-    try:
-        return dict(obj)
-    except:
-        return {}
-
-
 class SATConnectorReal:
     """
     Cliente REAL de conexión al SAT usando satcfdi.
-    Autenticación FIEL, descarga masiva de CFDIs, consulta de estado.
+    Igual al que funciona en local.
     """
     
     STATUS_ACCEPTED = 1
@@ -80,139 +68,205 @@ class SATConnectorReal:
             return False
     
     def submit_download_request(self, date_start: str, date_end: str, 
-                                   tipo: str = "recibidos",
-                                   include_xml: bool = True) -> Dict[str, Any]:
-        """Submit download request to SAT (async)."""
+                                   tipo: str = "recibidos") -> Dict[str, Any]:
+        """
+        Submit CFDI download request to SAT (async).
+        Uses METADATA + EstadoComprobante.TODOS (same as working local version).
+        """
         if not self._is_connected:
             if not self.authenticate():
                 raise ConnectionError("Could not connect to SAT")
         
-        logger.info(f"📥 Submitting download request for {tipo} from {date_start} to {date_end}")
+        logger.info(f"📥 Submitting {tipo} request: {date_start} to {date_end}")
         
         start = date.fromisoformat(date_start)
         end = date.fromisoformat(date_end)
         
         try:
-            # Try simplest approach - METADATA first (lighter)
-            request_type = TipoDescargaMasivaTerceros.METADATA
-            
+            # EXACT same call as working local version
             if tipo == "recibidos":
                 result = self.sat.recover_comprobante_received_request(
                     fecha_inicial=start,
                     fecha_final=end,
                     rfc_receptor=self.rfc,
-                    tipo_solicitud=request_type
+                    tipo_solicitud=TipoDescargaMasivaTerceros.METADATA,
+                    estado_comprobante=EstadoComprobante.TODOS
                 )
             else:
-                result = self.sat.recover_comprobante_emitted_request(
+                # Local uses "issued" not "emitted"
+                result = self.sat.recover_comprobante_issued_request(
                     fecha_inicial=start,
                     fecha_final=end,
                     rfc_emisor=self.rfc,
-                    tipo_solicitud=request_type
+                    tipo_solicitud=TipoDescargaMasivaTerceros.METADATA,
+                    estado_comprobante=EstadoComprobante.TODOS
                 )
             
-            result_dict = to_dict(result)
-            
-            cod_status = (result_dict.get('CodEstatus') or 
-                       result_dict.get('cod_estatus'))
-            mensaje = (result_dict.get('Mensaje') or 
-                      result_dict.get('mensaje', ''))
-            id_solicitud = (result_dict.get('IdSolicitud') or 
-                           result_dict.get('id_solicitud'))
+            request_id = result.get('IdSolicitud')
+            cod_status = result.get('CodEstatus')
+            mensaje = result.get('Mensaje', '')
             
             logger.info(f"📨 SAT Response: {cod_status} - {mensaje}")
             
-            if cod_status in ['5000', 5000] and id_solicitud:
-                self._pending_requests[id_solicitud] = {
-                    'id': id_solicitud,
+            if request_id:
+                self._pending_requests[request_id] = {
+                    'id': request_id,
                     'submitted': datetime.now().isoformat(),
                     'date_start': date_start,
                     'date_end': date_end,
                     'tipo': tipo,
-                    'request_type': 'METADATA',
-                    'cod_status': cod_status,
-                    'mensaje': mensaje
                 }
+                
                 return {
                     "status": "submitted",
-                    "id_solicitud": id_solicitud,
+                    "id_solicitud": request_id,
                     "cod_status": cod_status,
                     "message": mensaje,
                     "tipo": tipo,
-                    "request_type": "METADATA",
                     "date_range": f"{date_start} to {date_end}"
-                }
-            elif cod_status in ['5004', 5004]:
-                return {
-                    "status": "empty",
-                    "message": "No CFDIs found for this period",
-                    "cod_status": cod_status
                 }
             else:
                 return {
                     "status": "error",
                     "cod_status": cod_status,
-                    "message": mensaje,
-                    "raw_response": str(result_dict)[:500]
+                    "message": mensaje
                 }
             
         except Exception as e:
             logger.error(f"Submit download request failed: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
     
-    def check_request_status(self, id_solicitud: str, download: bool = False) -> Dict[str, Any]:
-        """
-        Check status of a submitted request.
-        If finished and download=True, returns the CFDIs.
-        """
+    def check_request_status(self, id_solicitud: str) -> Dict[str, Any]:
+        """Check status of a submitted request."""
         if not self._is_connected:
             if not self.authenticate():
                 return {"status": "error", "message": "Not authenticated"}
         
         try:
             status = self.sat.recover_comprobante_status(id_solicitud)
-            status_dict = to_dict(status)
+            estado = status.get('EstadoSolicitud')
+            num_cfdis = status.get('NumeroCFDIs', 0)
             
-            estado = status_dict.get('EstadoSolicitud', status_dict.get('estado_solicitud'))
-            num_cfdis = status_dict.get('NumeroCFDIs', status_dict.get('numero_cfdis', 0))
+            logger.info(f"Status: {estado} | CFDIs: {num_cfdis} | Request: {id_solicitud}")
             
-            result = {
-                "id_solicitud": id_solicitud,
-                "estado": estado,
-                "num_cfdis": num_cfdis,
-                "finished": estado == self.STATUS_FINISHED,
-                "error": estado in [self.STATUS_ERROR, self.STATUS_REJECTED]
-            }
-            
-            if estado == self.STATUS_FINISHED and download:
-                cfdis = self._download_packages(status_dict)
-                result["cfdis"] = cfdis
-                result["cfdis_count"] = len(cfdis)
+            if estado == self.STATUS_FINISHED:
+                cfdis = self._process_packages(status)
                 # Remove from pending
                 if id_solicitud in self._pending_requests:
                     del self._pending_requests[id_solicitud]
-            
-            return result
+                return {
+                    "id_solicitud": id_solicitud,
+                    "estado": estado,
+                    "finished": True,
+                    "num_cfdis": num_cfdis,
+                    "cfdis": cfdis,
+                    "cfdis_count": len(cfdis)
+                }
+            elif estado in [self.STATUS_ERROR, self.STATUS_REJECTED]:
+                if id_solicitud in self._pending_requests:
+                    del self._pending_requests[id_solicitud]
+                return {
+                    "id_solicitud": id_solicitud,
+                    "estado": estado,
+                    "finished": False,
+                    "error": True,
+                    "message": status.get('Mensaje', 'SAT error')
+                }
+            else:
+                return {
+                    "id_solicitud": id_solicitud,
+                    "estado": estado,
+                    "finished": False,
+                    "num_cfdis": num_cfdis
+                }
             
         except Exception as e:
             logger.error(f"Check status failed: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
     
-    def download_cfdis(self, date_start: str, date_end: str, 
-                       tipo: str = "recibidos",
-                       include_xml: bool = True) -> List[Dict[str, Any]]:
-        """
-        Download CFDIs from SAT portal using descarga masiva.
-        NOTE: This blocks until SAT finishes processing. For async, use submit_download_request().
-        """
-        submit_result = self.submit_download_request(date_start, date_end, tipo, include_xml)
+    def _process_packages(self, status: Dict) -> List[Dict]:
+        """Download and parse CFDI packages (same as working local version)"""
+        paquetes = status.get('IdsPaquetes') or []
+        cfdis = []
         
-        if submit_result.get("status") != "submitted":
-            logger.warning(f"Submit failed: {submit_result}")
+        for pkg_id in paquetes:
+            try:
+                # Local version: sat.recover_comprobante_download returns (msg, content)
+                result = self.sat.recover_comprobante_download(pkg_id)
+                
+                # Handle both tuple and single return
+                if isinstance(result, tuple):
+                    msg, content = result
+                else:
+                    content = result
+                
+                if content and len(str(content)) > 100:
+                    cfdis.extend(self._parse_package(content))
+                    
+            except Exception as e:
+                logger.error(f"Error downloading package {pkg_id}: {e}")
+        
+        logger.info(f"✅ Extracted {len(cfdis)} CFDIs from {len(paquetes)} packages")
+        return cfdis
+    
+    def _parse_package(self, b64_content: str) -> List[Dict]:
+        """Parse ZIP package containing CFDI metadata (CSV format from METADATA request)"""
+        cfdis = []
+        try:
+            decoded = base64.b64decode(b64_content)
+            with zipfile.ZipFile(io.BytesIO(decoded)) as zf:
+                for fname in zf.namelist():
+                    if fname.endswith('.txt'):
+                        content = zf.read(fname).decode('utf-8')
+                        lines = content.strip().split('\n')
+                        
+                        for line in lines[1:]:  # Skip header
+                            parts = line.split('~')
+                            if len(parts) >= 11:
+                                cfdis.append({
+                                    'uuid': parts[0],
+                                    'rfc_emisor': parts[1],
+                                    'nombre_emisor': parts[2],
+                                    'rfc_receptor': parts[3],
+                                    'nombre_receptor': parts[4],
+                                    'pac': parts[5],
+                                    'fecha_emision': parts[6][:10] if parts[6] else '',
+                                    'fecha_certificacion': parts[7],
+                                    'monto': float(parts[8]) if parts[8] else 0,
+                                    'efecto': parts[9],  # I/E/P/N
+                                    'estatus': parts[10],  # 1=Vigente, 0=Cancelado
+                                    'fecha_cancelacion': parts[11] if len(parts) > 11 else '',
+                                    'deductible': self._is_deductible(parts[1], parts[2])
+                                })
+        except Exception as e:
+            logger.error(f"Parse package error: {e}")
+        return cfdis
+    
+    def _is_deductible(self, rfc: str, nombre: str) -> bool:
+        """Check if expense is potentially deductible"""
+        keywords = [
+            'gasolina', 'telmex', 'izzi', 'totalplay', 'uber', 'didi',
+            'amazon', 'microsoft', 'google', 'apple', 'stripe', 'github',
+            'aws', 'azure', 'cloud', 'oficina', 'papeleria', 'software',
+            'restaurante', 'comida', 'transporte', 'seguro', 'hospital',
+            'farmacia', 'doctor', 'medico', 'renta', 'internet', 'servicio'
+        ]
+        search = f"{nombre} {rfc}".lower()
+        return any(kw in search for kw in keywords)
+    
+    def download_cfdis(self, date_start: str, date_end: str, 
+                       tipo: str = "recibidos") -> List[Dict[str, Any]]:
+        """
+        Blocking download - submits request and polls until done.
+        WARNING: Can take 30-120s. Use submit_download_request for async.
+        """
+        result = self.submit_download_request(date_start, date_end, tipo)
+        
+        if result.get('status') != 'submitted':
             return []
         
-        id_solicitud = submit_result["id_solicitud"]
-        logger.info(f"⏳ Waiting for SAT to process request {id_solicitud}...")
+        id_solicitud = result['id_solicitud']
+        logger.info(f"⏳ Polling SAT for request {id_solicitud}...")
         
         max_wait = 120
         interval = 5
@@ -222,160 +276,24 @@ class SATConnectorReal:
             time.sleep(interval)
             elapsed += interval
             
-            status = self.check_request_status(id_solicitud, download=True)
-            estado = status.get("estado")
+            status = self.check_request_status(id_solicitud)
             
-            logger.info(f"  Status: {estado} | CFDIs: {status.get('num_cfdis', 0)} | Elapsed: {elapsed}s")
-            
-            if status.get("finished"):
-                return status.get("cfdis", [])
-            elif status.get("error"):
-                logger.error(f"SAT error on request {id_solicitud}")
+            if status.get('finished'):
+                return status.get('cfdis', [])
+            elif status.get('error'):
                 return []
         
-        # Timeout
-        logger.warning(f"Timeout waiting for request {id_solicitud}")
+        logger.warning(f"Timeout waiting for {id_solicitud}")
         return []
-    
-    def _download_packages(self, status: Dict) -> List[Dict[str, Any]]:
-        """Download and parse CFDI packages"""
-        id_paquetes = status.get('IdsPaquetes') or status.get('IdPaquetes') or status.get('ids_paquetes') or []
-        num_cfdis = status.get('NumeroCFDIs', 0)
-        
-        logger.info(f"📦 Downloading {len(id_paquetes)} packages ({num_cfdis} CFDIs)")
-        
-        all_cfdis = []
-        
-        for pkg_id in id_paquetes:
-            try:
-                result = self.sat.recover_comprobante_download(pkg_id)
-                result_dict = to_dict(result)
-                
-                logger.info(f"  Package {pkg_id}: downloaded")
-                
-                if isinstance(result_dict, dict):
-                    for uuid_key, cfdi_xml in result_dict.items():
-                        cfdi_info = self._extract_cfdi_info(cfdi_xml, uuid_key)
-                        if cfdi_info:
-                            all_cfdis.append(cfdi_info)
-                            
-            except Exception as e:
-                logger.error(f"Error downloading package {pkg_id}: {e}")
-        
-        logger.info(f"✅ Extracted {len(all_cfdis)} CFDIs")
-        return all_cfdis
-    
-    def _extract_cfdi_info(self, xml_content: bytes, uuid: str = None) -> Optional[Dict[str, Any]]:
-        """Extract key info from CFDI XML"""
-        from xml.etree import ElementTree as ET
-        try:
-            if isinstance(xml_content, str):
-                root = ET.fromstring(xml_content)
-            else:
-                root = ET.fromstring(xml_content)
-            
-            ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4', 
-                  'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital'}
-            
-            emisor = root.find('.//cfdi:Emisor', ns)
-            receptor = root.find('.//cfdi:Receptor', ns)
-            timbre = root.find('.//tfd:TimbreFiscalDigital', ns)
-            
-            emisor_nombre = emisor.get('Nombre', 'Unknown') if emisor is not None else 'Unknown'
-            emisor_rfc = emisor.get('Rfc', 'Unknown') if emisor is not None else 'Unknown'
-            
-            total = float(root.get('Total', 0))
-            subtotal = float(root.get('SubTotal', 0))
-            fecha = root.get('Fecha', '')
-            folio = root.get('Folio', 'S/N')
-            tipo_comp = root.get('TipoDeComprobante', 'I')
-            
-            if not uuid and timbre is not None:
-                uuid = timbre.get('UUID', '')
-            
-            return {
-                'uuid': uuid or '',
-                'folio': folio,
-                'emisor': emisor_nombre,
-                'emisor_rfc': emisor_rfc,
-                'receptor_rfc': receptor.get('Rfc', '') if receptor is not None else '',
-                'monto': total,
-                'subtotal': subtotal,
-                'fecha': fecha[:10] if fecha else '',
-                'tipo_comprobante': tipo_comp,
-                'status': 'Vigente',
-                'deductible': self._is_deductible(emisor_rfc, emisor_nombre)
-            }
-        except Exception as e:
-            logger.error(f"Error extracting CFDI info: {e}")
-            return None
-    
-    def _is_deductible(self, emisor_rfc: str, emisor_nombre: str) -> bool:
-        """Check if expense is potentially deductible"""
-        deductible_keywords = [
-            'gasolina', 'telmex', 'izzi', 'totalplay', 'uber', 'didi',
-            'amazon', 'microsoft', 'google', 'apple', 'stripe', 'github',
-            'aws', 'azure', 'cloud', 'oficina', 'papeleria', 'software',
-            'restaurante', 'comida', 'transporte', 'seguro', 'hospital',
-            'farmacia', 'doctor', 'medico', 'renta', 'internet', 'servicio'
-        ]
-        search_text = f"{emisor_nombre} {emisor_rfc}".lower()
-        return any(kw in search_text for kw in deductible_keywords)
-    
-    def get_compliance_opinion(self) -> Dict[str, Any]:
-        """Get compliance opinion from SAT"""
-        if not self._is_connected:
-            if not self.authenticate():
-                return {
-                    "rfc": self.rfc, "status": "Error",
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "pending_obligations": 0, "verified": False
-                }
-        
-        try:
-            pending = self.sat.pending(self.rfc)
-            pending_dict = to_dict(pending) if not isinstance(pending, dict) else pending
-            
-            return {
-                "rfc": self.rfc,
-                "status": "Positiva" if not pending_dict else "Con pendientes",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "pending_obligations": len(pending_dict) if isinstance(pending_dict, (dict, list)) else 0,
-                "verified": True
-            }
-        except Exception as e:
-            logger.error(f"Compliance check failed: {e}")
-            return {
-                "rfc": self.rfc, "status": "Error",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "pending_obligations": 0, "verified": False
-            }
 
 
-# Test
 if __name__ == "__main__":
-    print("🚀 Testing SAT Real Connection v3...")
-    
+    print("🚀 Testing SAT Real Connection v4...")
     connector = SATConnectorReal(rfc="MUTM8610091NA")
     
     if connector.authenticate():
         print("✅ Auth OK")
-        
-        # Test CFDI download
-        print("\n📥 Downloading CFDIs...")
-        cfdis = connector.download_cfdis(
-            date_start="2026-01-01",
-            date_end="2026-01-31",
-            tipo="recibidos"
-        )
-        
-        print(f"\n📊 Result: {len(cfdis)} CFDIs")
-        for cfdi in cfdis[:5]:
-            print(f"  • {cfdi['emisor']} | ${cfdi['monto']:,.2f} | {cfdi['fecha']} | Deductible: {cfdi['deductible']}")
-        
-        # Test compliance
-        print("\n📋 Compliance:")
-        opinion = connector.get_compliance_opinion()
-        print(f"  Status: {opinion['status']} | Pending: {opinion['pending_obligations']}")
+        result = connector.submit_download_request("2026-04-01", "2026-04-30", "recibidos")
+        print(f"📤 Submit: {result}")
     else:
         print("❌ Auth failed")
