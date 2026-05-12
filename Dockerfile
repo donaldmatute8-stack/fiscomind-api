@@ -12,9 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Vault credentials directory
+# Vault credentials - set env var so secure_vault finds them
 ENV VAULT_DIR=/app/credentials
-RUN mkdir -p ${VAULT_DIR} && chmod 700 ${VAULT_DIR}
 
 # Data directory for CFDI cache
 ENV DATA_DIR=/app/data

@@ -56,9 +56,10 @@ def get_sat_connector():
     try:
         from sat_connector_real import SATConnectorReal
         connector = SATConnectorReal(rfc="MUTM8610091NA")
+        logger.info(f"SAT connector created. Vault dir: {connector.vault.VAULT_DIR}")
         return connector
     except Exception as e:
-        logger.error(f"Error creating SAT connector: {e}")
+        logger.error(f"Error creating SAT connector: {e}", exc_info=True)
         return None
 
 # Global connector (lazy init)
@@ -153,7 +154,7 @@ def sync():
     """Sincronizar CFDIs con SAT real usando FIEL del vault"""
     connector = sat_connector()
     if not connector:
-        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+        return jsonify({"status": "error", "message": "SAT connector no disponible. Verifica VAULT_DIR y credenciales."}), 500
     
     data = request.json or {}
     date_start = data.get('date_start', (date.today() - timedelta(days=90)).isoformat())
@@ -161,9 +162,11 @@ def sync():
     
     try:
         if not connector._is_connected:
+            logger.info("Attempting SAT authentication...")
             auth_ok = connector.authenticate()
             if not auth_ok:
-                return jsonify({"status": "error", "message": "Autenticación FIEL fallida. Verifica credenciales del vault."}), 401
+                return jsonify({"status": "error", "message": "Autenticación FIEL fallida. Verifica credenciales del vault.", "vault_dir": str(connector.vault.VAULT_DIR)}), 401
+            logger.info("SAT auth successful")
         
         wait = data.get('wait', True)  # By default, long-poll until SAT finishes
         
@@ -177,6 +180,7 @@ def sync():
         
         # Save pending requests for later checking
         pending = dict(connector._pending_requests)
+        logger.info(f"Sync done: {len(recibidos)} recibidos, {len(emitidos)} emitidos, {len(pending)} pending")
         
         # Update cache
         cache = load_cache()
@@ -216,8 +220,8 @@ def sync():
         })
         
     except Exception as e:
-        logger.error(f"Sync failed: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Sync failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e), "vault_dir": str(connector.vault.VAULT_DIR) if connector else None}), 500
 
 @app.route('/sync/status')
 def sync_status():
