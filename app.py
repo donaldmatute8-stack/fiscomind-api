@@ -25,7 +25,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fiscomind-api")
 
-DATA_DIR = Path(os.environ.get('DATA_DIR', '/tmp/fiscomind-data'))
+DATA_DIR = Path(os.environ.get('DATA_DIR', '/app/data'))
 DATA_DIR.mkdir(exist_ok=True, parents=True)
 CACHE_FILE = DATA_DIR / 'cfdi_cache.json'
 

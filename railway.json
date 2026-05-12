@@ -10,6 +10,12 @@
     "restartPolicyMaxRetries": 5,
     "healthcheckPath": "/health",
     "healthcheckTimeout": 120,
-    "healthcheckInterval": 5
+    "healthcheckInterval": 5,
+    "volumes": [
+      {
+        "mountPath": "/app/data",
+        "name": "fiscomind-data"
+      }
+    ]
   }
 }
