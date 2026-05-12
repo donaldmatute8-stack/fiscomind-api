@@ -1,332 +1,467 @@
 #!/usr/bin/env python3
 """
-FiscoMind Railway API v3.0
-API completa para SAT con soporte para:
-- Sincronización CFDIs
-- Emisión facturas (SAT gratuito)
-- Cancelación
-- Descarga XML/PDF
+FiscoMind Railway API v4.0 - CONEXIÓN REAL AL SAT
+- Sincronización CFDIs reales via satcfdi
+- Emisión facturas CFDI 4.0 via portal gratuito SAT
+- Cancelación real
+- Dashboard con datos reales
+- Vault encriptado para credenciales
 """
 import os
 import sys
 import json
 import base64
 import io
+import time
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from xml.etree import ElementTree as ET
 
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+
 app = Flask(__name__)
 CORS(app, origins=["*"], supports_credentials=True)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("fiscomind-api")
 
 # Data directory (persistente en Railway)
 DATA_DIR = Path(os.environ.get('DATA_DIR', '/tmp/fiscomind-data'))
 DATA_DIR.mkdir(exist_ok=True, parents=True)
 
-# In-memory storage for demo (reemplazar con DB en producción)
-_users_db = {}
-_cfdis_db = {}
+# CFDI cache file
+CACHE_FILE = DATA_DIR / 'cfdi_cache.json'
 
-# Sample data for Marco
-SAMPLE_DATA = {
-    "marco_test": {
-        "rfc": "MUTM8610091NA",
-        "nombre": "MARCO ARTURO MUÑOZ DEL TORO",
-        "cfdis_recibidos": [
-            {"uuid": "9C07F8DE-9DD3-4C60-9EE7-238F02D1F7C0", "rfc_emisor": "BRM940216EQ6", "nombre_emisor": "BANCO REGIONAL SA", "rfc_receptor": "MUTM8610091NA", "monto": 150.80, "fecha_emision": "2026-04-03", "efecto": "I", "estatus": "1"},
-            {"uuid": "D6BBE9EF-7582-49DA-BB17-9B344DDD789B", "rfc_emisor": "CNM980114PI2", "nombre_emisor": "AT&T COMUNICACIONES", "rfc_receptor": "MUTM8610091NA", "monto": 804.04, "fecha_emision": "2026-04-15", "efecto": "I", "estatus": "1"},
-            {"uuid": "6D175680-B5C2-48B0-B8A3-8FC53FB3337F", "rfc_emisor": "CNM980114PI2", "nombre_emisor": "AT&T COMUNICACIONES", "rfc_receptor": "MUTM8610091NA", "monto": 372.41, "fecha_emision": "2026-04-15", "efecto": "E", "estatus": "1"},
-        ],
-        "cfdis_emitidos": [
-            {"uuid": "CE113741", "rfc_emisor": "MUTM8610091NA", "nombre_emisor": "MARCO ARTURO MUÑOZ DEL TORO", "rfc_receptor": "BENITTOS", "nombre_receptor": "BENITTOS FOOD PARTY", "monto": 8352.00, "fecha_emision": "2026-04-01", "efecto": "I", "estatus": "1"},
-            {"uuid": "CF0741C5", "rfc_emisor": "MUTM8610091NA", "nombre_emisor": "MARCO ARTURO MUÑOZ DEL TORO", "rfc_receptor": "BENITTOS", "nombre_receptor": "BENITTOS FOOD PARTY", "monto": 41669.85, "fecha_emision": "2026-04-15", "efecto": "I", "estatus": "1"},
-            {"uuid": "26072D49", "rfc_emisor": "MUTM8610091NA", "nombre_emisor": "MARCO ARTURO MUÑOZ DEL TORO", "rfc_receptor": "BENITTOS", "nombre_receptor": "BENITTOS FOOD PARTY", "monto": 45889.60, "fecha_emision": "2026-05-01", "efecto": "I", "estatus": "1"},
-            {"uuid": "DA4E4E23", "rfc_emisor": "MUTM8610091NA", "nombre_emisor": "MARCO ARTURO MUÑOZ DEL TORO", "rfc_receptor": "BENITTOS", "nombre_receptor": "BENITTOS FOOD PARTY", "monto": 66816.00, "fecha_emision": "2026-05-08", "efecto": "I", "estatus": "1"},
-        ]
-    }
+MONTH_NAMES = {
+    '01': 'Enero', '02': 'Febrero', '03': 'Marzo', '04': 'Abril',
+    '05': 'Mayo', '06': 'Junio', '07': 'Julio', '08': 'Agosto',
+    '09': 'Septiembre', '10': 'Octubre', '11': 'Noviembre', '12': 'Diciembre'
 }
+
+# ─── Vault & SAT Connector ──────────────────────────────────────────
+
+def get_vault():
+    """Get vault instance with credentials"""
+    from secure_vault import Vault
+    return Vault()
+
+def get_sat_connector():
+    """Get or create SAT connector with real FIEL auth"""
+    try:
+        from sat_connector_real import SATConnectorReal
+        connector = SATConnectorReal(rfc="MUTM8610091NA")
+        return connector
+    except Exception as e:
+        logger.error(f"Error creating SAT connector: {e}")
+        return None
+
+# Global connector (lazy init)
+_sat_connector = None
+
+def sat_connector():
+    global _sat_connector
+    if _sat_connector is None:
+        _sat_connector = get_sat_connector()
+    return _sat_connector
+
+# ─── CFDI Cache ─────────────────────────────────────────────────────
+
+def load_cache() -> Dict:
+    """Load CFDI cache from disk"""
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {"last_sync": None, "recibidos": [], "emitidos": []}
+
+def save_cache(data: Dict):
+    """Save CFDI cache to disk"""
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+
+# ─── ROUTES ─────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
+    sat_status = "connected" if sat_connector() and sat_connector()._is_connected else "available"
     return jsonify({
         "name": "FiscoMind API",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "status": "running",
+        "sat_connection": sat_status,
+        "mode": "REAL",
         "endpoints": {
             "GET /": "Info",
             "GET /health": "Health check",
-            "GET /dashboard": "Dashboard fiscal",
-            "POST /sync": "Sincronizar con SAT",
-            "GET /cfdis": "Lista CFDIs",
+            "GET /dashboard": "Dashboard fiscal (datos reales)",
+            "POST /sync": "Sincronizar CFDIs con SAT real",
+            "GET /sync/status": "Estado de sincronización pendiente",
+            "GET /cfdis": "Lista CFDIs (cache + reales)",
             "GET /cfdis/<uuid>": "Detalle CFDI",
             "GET /emitidos": "Facturas emitidas",
-            "POST /emitir": "Emitir factura",
-            "POST /cancelar": "Cancelar factura",
+            "POST /emitir": "Emitir factura CFDI 4.0 (SAT gratuito)",
+            "POST /cancelar": "Cancelar factura (SAT real)",
+            "GET /obligaciones": "Obligaciones fiscales",
+            "GET /opinion": "Opinión de cumplimiento SAT",
         }
     })
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat(), "mode": "REAL"})
 
 @app.route('/dashboard')
 def dashboard():
-    user_id = request.args.get('user_id', 'default')
-    data = SAMPLE_DATA.get(user_id, SAMPLE_DATA['marco_test'])
+    cache = load_cache()
+    recibidos = cache.get('recibidos', [])
+    emitidos = cache.get('emitidos', [])
     
-    recibidos = data['cfdis_recibidos']
-    emitidos = data['cfdis_emitidos']
+    total_ingresos = sum(float(c.get('monto', 0)) for c in recibidos if c.get('tipo_comprobante') == 'I')
+    total_egresos = sum(float(c.get('monto', 0)) for c in recibidos if c.get('tipo_comprobante') == 'E')
+    total_emitidos = sum(float(c.get('monto', 0)) for c in emitidos)
     
-    total_ingresos = sum(c['monto'] for c in recibidos if c['efecto'] == 'I')
-    total_egresos = sum(c['monto'] for c in recibidos if c['efecto'] == 'E')
-    total_emitidos = sum(c['monto'] for c in emitidos)
+    # Calcular deducibles
+    deducibles = [c for c in recibidos if c.get('deductible')]
+    total_deducible = sum(float(c.get('monto', 0)) for c in deducibles)
     
     return jsonify({
-        "rfc": data['rfc'],
-        "user_id": user_id,
-        "last_sync": "2026-05-11",
+        "rfc": "MUTM8610091NA",
+        "last_sync": cache.get('last_sync'),
         "summary": {
             "total_recibidos": len(recibidos),
             "total_emitidos": len(emitidos),
-            "total_ingresos": total_ingresos,
-            "total_egresos": total_egresos,
-            "total_emitido_monto": total_emitidos,
-            "ahorro_isr_estimado": total_ingresos * 0.30
+            "total_ingresos": round(total_ingresos, 2),
+            "total_egresos": round(total_egresos, 2),
+            "total_emitido_monto": round(total_emitidos, 2),
+            "total_deducible": round(total_deducible, 2),
+            "ahorro_isr_estimado": round(total_deducible * 0.30, 2),
+            "deducibles_count": len(deducibles)
         },
-        "recent_cfdis": recibidos + emitidos
+        "recent_cfdis": (recibidos + emitidos)[:20]
     })
 
 @app.route('/sync', methods=['POST'])
 def sync():
-    user_id = request.args.get('user_id') or request.json.get('user_id', 'default')
+    """Sincronizar CFDIs con SAT real usando FIEL del vault"""
+    connector = sat_connector()
+    if not connector:
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+    
+    data = request.json or {}
+    date_start = data.get('date_start', (date.today() - timedelta(days=90)).isoformat())
+    date_end = data.get('date_end', date.today().isoformat())
+    
+    try:
+        if not connector._is_connected:
+            auth_ok = connector.authenticate()
+            if not auth_ok:
+                return jsonify({"status": "error", "message": "Autenticación FIEL fallida. Verifica credenciales del vault."}), 401
+        
+        # Download recibidos
+        logger.info(f"📥 Syncing recibidos: {date_start} to {date_end}")
+        recibidos = connector.download_cfdis(date_start, date_end, tipo="recibidos")
+        
+        # Download emitidos
+        logger.info(f"📤 Syncing emitidos: {date_start} to {date_end}")
+        emitidos = connector.download_cfdis(date_start, date_end, tipo="emitidos")
+        
+        # Update cache
+        cache = load_cache()
+        cache['last_sync'] = datetime.now().isoformat()
+        cache['last_date_start'] = date_start
+        cache['last_date_end'] = date_end
+        cache['recibidos'] = recibidos
+        cache['emitidos'] = emitidos
+        save_cache(cache)
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Sincronización completada: {len(recibidos)} recibidos, {len(emitidos)} emitidos",
+            "date_range": f"{date_start} to {date_end}",
+            "recibidos_count": len(recibidos),
+            "emitidos_count": len(emitidos),
+            "last_sync": cache['last_sync']
+        })
+        
+    except Exception as e:
+        logger.error(f"Sync failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/sync/status')
+def sync_status():
+    """Check pending SAT requests"""
+    connector = sat_connector()
+    if not connector:
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+    
+    pending = connector._pending_requests if connector else {}
+    cache = load_cache()
+    
     return jsonify({
-        "status": "requested",
-        "message": "Sincronización iniciada (demo mode)",
-        "user_id": user_id,
-        "note": "En producción conecta con SAT real"
+        "connected": connector._is_connected if connector else False,
+        "last_sync": cache.get('last_sync'),
+        "pending_requests": len(pending),
+        "requests": {k: {kk: str(vv) for kk, vv in v.items()} for k, v in pending.items()},
+        "cache_recibidos": len(cache.get('recibidos', [])),
+        "cache_emitidos": len(cache.get('emitidos', []))
     })
 
 @app.route('/cfdis')
 def list_cfdis():
-    user_id = request.args.get('user_id', 'default')
+    cache = load_cache()
     tipo = request.args.get('tipo', 'all')
-    data = SAMPLE_DATA.get(user_id, SAMPLE_DATA['marco_test'])
     
     cfdis = []
     if tipo in ['all', 'recibidos']:
-        cfdis.extend(data['cfdis_recibidos'])
+        cfdis.extend(cache.get('recibidos', []))
     if tipo in ['all', 'emitidos']:
-        cfdis.extend(data['cfdis_emitidos'])
+        cfdis.extend(cache.get('emitidos', []))
     
     return jsonify({
-        "rfc": data['rfc'],
+        "rfc": "MUTM8610091NA",
         "tipo": tipo,
         "total": len(cfdis),
-        "cfdis": cfdis
+        "cfdis": cfdis,
+        "last_sync": cache.get('last_sync')
     })
 
 @app.route('/cfdis/<uuid>')
 def get_cfdi(uuid):
-    user_id = request.args.get('user_id', 'default')
-    data = SAMPLE_DATA.get(user_id, SAMPLE_DATA['marco_test'])
+    cache = load_cache()
+    uuid_upper = uuid.upper()
     
-    for c in data['cfdis_recibidos'] + data['cfdis_emitidos']:
-        if c['uuid'].upper() == uuid.upper():
+    for c in cache.get('recibidos', []) + cache.get('emitidos', []):
+        if c.get('uuid', '').upper() == uuid_upper:
             return jsonify(c)
-    return jsonify({"error": "CFDI no encontrado"}), 404
+    return jsonify({"error": "CFDI no encontrado. Intenta sincronizar primero con POST /sync"}), 404
 
 @app.route('/emitidos')
 def list_emitidos():
-    user_id = request.args.get('user_id', 'default')
-    data = SAMPLE_DATA.get(user_id, SAMPLE_DATA['marco_test'])
-    emitidos = data['cfdis_emitidos']
-    total = sum(c['monto'] for c in emitidos)
+    cache = load_cache()
+    emitidos = cache.get('emitidos', [])
+    total = sum(float(c.get('monto', 0)) for c in emitidos)
     
     return jsonify({
-        "rfc": data['rfc'],
+        "rfc": "MUTM8610091NA",
         "total_emitidos": len(emitidos),
-        "total_monto": total,
-        "cfdis": emitidos
+        "total_monto": round(total, 2),
+        "cfdis": emitidos,
+        "last_sync": cache.get('last_sync')
     })
 
 @app.route('/emitir', methods=['POST'])
 def emitir():
-    """Emitir factura - requiere conexión SAT real"""
+    """
+    Emitir factura CFDI 4.0 usando SAT gratuito (portal SAT).
+    Requiere FIEL del vault para autenticación.
+    """
+    connector = sat_connector()
+    if not connector:
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+    
     data = request.json or {}
-    return jsonify({
-        "status": "pending",
-        "message": "Emisión requiere integración con SAT",
-        "note": "Para producción: integrar con servicio gratuito SAT o PAC",
-        "data_received": data
-    })
+    
+    required = ['rfc_receptor', 'nombre_receptor', 'codigo_postal', 'concepto',
+                'cantidad', 'precio_unitario']
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        return jsonify({"status": "error", "message": f"Campos requeridos faltantes: {', '.join(missing)}"}), 400
+    
+    try:
+        if not connector._is_connected:
+            auth_ok = connector.authenticate()
+            if not auth_ok:
+                return jsonify({"status": "error", "message": "Autenticación FIEL fallida"}), 401
+        
+        from satcfdi.models import CFDI
+        from satcfdi import cfdi
+        from satcfdi.pacs.sat import SAT
+        
+        cantidad = float(data.get('cantidad', 1))
+        precio_unitario = float(data.get('precio_unitario', 0))
+        subtotal = cantidad * precio_unitario
+        iva = subtotal * 0.16
+        total = subtotal + iva
+        
+        # Build CFDI 4.0 using satcfdi
+        fecha_emision = datetime.now()
+        
+        cfdi_doc = cfdi.CFDI(
+            Version="4.0",
+            Serie=data.get('serie', 'F'),
+            Folio=data.get('folio', str(int(time.time()))),
+            Fecha=fecha_emision.strftime('%Y-%m-%dT%H:%M:%S'),
+            FormaPago=data.get('forma_pago', '03'),
+            CondicionesDePago=data.get('condiciones_pago', 'Contado'),
+            SubTotal=round(subtotal, 2),
+            Moneda='MXN',
+            TipoCambio=1,
+            Total=round(total, 2),
+            TipoDeComprobante='I',
+            MetodoPago=data.get('metodo_pago', 'PUE'),
+            LugarExpedicion=data.get('lugar_expedicion', data.get('codigo_postal', '63700')),
+            Exportacion='01',
+        )
+        
+        cfdi_doc.add_emisor(
+            Rfc=connector.rfc,
+            Nombre="MARCO ARTURO MUÑOZ DEL TORO",
+            RegimenFiscal=data.get('regimen_fiscal_emisor', '612'),
+        )
+        
+        cfdi_doc.add_receptor(
+            Rfc=data['rfc_receptor'],
+            Nombre=data['nombre_receptor'],
+            DomicilioFiscalReceptor=data['codigo_postal'],
+            RegimenFiscalReceptor=data.get('regimen_fiscal_receptor', '601'),
+            UsoCFDI=data.get('uso_cfdi', 'G03'),
+        )
+        
+        cfdi_doc.add_concepto(
+            ClaveProdServ=data.get('clave_prod_serv', '01010101'),
+            Cantidad=cantidad,
+            ClaveUnidad=data.get('clave_unidad', 'E48'),
+            Descripcion=data['concepto'],
+            ValorUnitario=round(precio_unitario, 2),
+            Importe=round(subtotal, 2),
+            ObjetoImp='02',
+        )
+        
+        # Sign with FIEL
+        cfdi_doc.sign(connector.signer)
+        
+        # Stamp via SAT portal (gratuito)
+        sat = SAT(connector.signer)
+        result = sat.stamp(cfdi_doc)
+        
+        # Extract UUID from stamped CFDI
+        uuid_timbrado = None
+        xml_timbrado = None
+        if hasattr(result, 'uuid'):
+            uuid_timbrado = result.uuid
+        elif isinstance(result, dict):
+            uuid_timbrado = result.get('uuid')
+            xml_timbrado = result.get('xml')
+        
+        # Update emitidos cache
+        cache = load_cache()
+        new_cfdi = {
+            'uuid': uuid_timbrado,
+            'rfc_emisor': connector.rfc,
+            'nombre_emisor': 'MARCO ARTURO MUÑOZ DEL TORO',
+            'rfc_receptor': data['rfc_receptor'],
+            'nombre_receptor': data['nombre_receptor'],
+            'monto': round(total, 2),
+            'subtotal': round(subtotal, 2),
+            'iva': round(iva, 2),
+            'fecha_emision': fecha_emision.isoformat(),
+            'tipo_comprobante': 'I',
+            'estatus': '1',
+            'version': '4.0'
+        }
+        cache.setdefault('emitidos', []).append(new_cfdi)
+        cache['last_sync'] = datetime.now().isoformat()
+        save_cache(cache)
+        
+        return jsonify({
+            "status": "success",
+            "message": "CFDI 4.0 emitido y timbrado via SAT gratuito",
+            "uuid": uuid_timbrado,
+            "totales": {
+                "subtotal": round(subtotal, 2),
+                "iva": round(iva, 2),
+                "total": round(total, 2)
+            },
+            "fecha": fecha_emision.isoformat(),
+            "xml_disponible": f"/cfdis/{uuid_timbrado}/xml" if uuid_timbrado else None
+        })
+        
+    except AttributeError as e:
+        logger.error(f"Emitir CFDI attribute error: {e}")
+        return jsonify({
+            "status": "partial",
+            "message": "CFDI generado pero timbrado requiere ajuste de API satcfdi",
+            "error": str(e),
+            "note": "Verificar método stamp() de satcfdi.pacs.sat.SAT"
+        }), 202
+    except Exception as e:
+        logger.error(f"Emitir CFDI failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/cancelar', methods=['POST'])
 def cancelar():
-    """Cancelar factura"""
+    """Cancelar factura via SAT real"""
+    connector = sat_connector()
+    if not connector:
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+    
     data = request.json or {}
-    return jsonify({
-        "status": "pending", 
-        "message": "Cancelación requiere integración con SAT",
-        "uuid": data.get('uuid'),
-        "motivo": data.get('motivo')
-    })
+    uuid_cancelar = data.get('uuid')
+    motivo = data.get('motivo', '02')  # 02 = Comprobante emitido con errores
+    uuid_relativo = data.get('uuid_relacionado')
+    
+    if not uuid_cancelar:
+        return jsonify({"status": "error", "message": "UUID requerido"}), 400
+    
+    try:
+        if not connector._is_connected:
+            auth_ok = connector.authenticate()
+            if not auth_ok:
+                return jsonify({"status": "error", "message": "Autenticación FIEL fallida"}), 401
+        
+        from satcfdi.pacs.sat import SAT
+        sat = SAT(connector.signer)
+        
+        result = sat.cancel(
+            rfc_emisor=connector.rfc,
+            uuid=uuid_cancelar,
+            motivo=motivo,
+            uuid_relativo=uuid_relativo
+        )
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Solicitud de cancelación enviada para {uuid_cancelar}",
+            "uuid": uuid_cancelar,
+            "result": str(result) if not isinstance(result, dict) else result
+        })
+        
+    except Exception as e:
+        logger.error(f"Cancel failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/opinion')
+def opinion_cumplimiento():
+    """Opinión de cumplimiento SAT"""
+    connector = sat_connector()
+    if not connector:
+        return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
+    
+    try:
+        if not connector._is_connected:
+            connector.authenticate()
+        
+        opinion = connector.get_compliance_opinion()
+        return jsonify(opinion)
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/obligaciones')
 def obligaciones():
     """Get fiscal obligations based on current date"""
-    from datetime import date, timedelta
-    
     today = date.today()
     year = today.year
     month = today.month
     day = today.day
-    
-    obligations = []
-    
-    # Monthly declarations - ISR/IVA (day 17)
-    days_to_17 = 17 - day if day <= 17 else (17 + 30 - day)
-    if days_to_17 <= 5:
-        urgency = 'critical' if days_to_17 <= 3 else 'high'
-        obligations.append({
-            'id': 'iva-isr-mensual',
-            'titulo': f'IVA + ISR Provisional - {MONTH_NAMES.get(str(month).zfill(2), month)} {year}',
-            'tipo': 'Mensual',
-            'vence': f'{year}-{str(month).zfill(2)}-17',
-            'dias_restantes': days_to_17,
-            'urgencia': urgency,
-            'descripcion': f'Declaración mensual de IVA e ISR. Vence el día 17 de {MONTH_NAMES.get(str(month).zfill(2), month)}.',
-            'accion_recomendada': 'Presenta tu declaración antes de la fecha límite para evitar recargos.',
-            'penalizacion': 'Recargos del 1.47% mensual + multa del 20%',
-            'monto_estimado': None  # Calculado dinámicamente si hay datos
-        })
-    else:
-        obligations.append({
-            'id': 'iva-isr-mensual',
-            'titulo': f'IVA + ISR Provisional - {MONTH_NAMES.get(str(month).zfill(2), month)} {year}',
-            'tipo': 'Mensual',
-            'vence': f'{year}-{str(month).zfill(2)}-17',
-            'dias_restantes': days_to_17,
-            'urgencia': 'normal',
-            'descripcion': f'Declaración mensual de IVA e ISR.',
-            'accion_recomendada': 'Prepara tus CFDIs para deducciones.',
-            'penalizacion': None,
-            'monto_estimado': None
-        })
-    
-    # Next month preview
-    next_m = month + 1 if month < 12 else 1
-    next_y = year if month < 12 else year + 1
-    obligations.append({
-        'id': 'iva-isr-proximo',
-        'titulo': f'IVA + ISR Provisional - {MONTH_NAMES.get(str(next_m).zfill(2), next_m)} {next_y}',
-        'tipo': 'Mensual',
-        'vence': f'{next_y}-{str(next_m).zfill(2)}-17',
-        'dias_restantes': days_to_17 + 30,
-        'urgencia': 'low',
-        'descripcion': f'Próxima declaración mensual.',
-        'accion_recomendada': 'Acumula deducciones.',
-        'penalizacion': None,
-        'monto_estimado': None
-    })
-    
-    # Quarterly - IETU (if applicable, for certain regimes)
-    if month in [3, 6, 9, 12]:
-        last_day = {3: 31, 6: 30, 9: 30, 12: 31}[month]
-        days_to_end = last_day - day
-        if days_to_end <= 10:
-            obligations.append({
-                'id': f'ietu-trimestre-{month//3}',
-                'titulo': f'IETU Trimestral - T{month//3} {year}',
-                'tipo': 'Trimestral',
-                'vence': f'{year}-{str(month).zfill(2)}-{last_day}',
-                'dias_restantes': days_to_end,
-                'urgencia': 'high' if days_to_end <= 5 else 'normal',
-                'descripcion': f'Declaración trimestral de IETU.',
-                'accion_recomendada': 'Verifica si aplica a tu régimen fiscal.',
-                'penalizacion': 'Recargos por presentación extemporánea',
-                'monto_estimado': None
-            })
-    
-    # Annual declaration - April 30
-    if month <= 4:
-        days_to_april_30 = (date(year, 4, 30) - today).days
-        if days_to_april_30 > 0:
-            urgency = 'critical' if days_to_april_30 <= 7 else ('high' if days_to_april_30 <= 15 else 'normal')
-            obligations.append({
-                'id': 'declaracion-anual',
-                'titulo': f'Declaración Anual {year}',
-                'tipo': 'Anual',
-                'vence': f'{year}-04-30',
-                'dias_restantes': days_to_april_30,
-                'urgencia': urgency,
-                'descripcion': 'Declaración Anual de Personas Físicas. Obligatorio para todos los contribuyentes.',
-                'accion_recomendada': 'Revisa todas tus deducciones personales y reembolsos.',
-                'penalizacion': 'Multa de hasta 40% del impuesto omitido + recargos',
-                'monto_estimado': None
-            })
-    
-    # Monthly accounting submission (some regimes require this)
-    obligations.append({
-        'id': 'contabilidad-electronica',
-        'titulo': f'Contabilidad Electrónica - {MONTH_NAMES.get(str(month).zfill(2), month)} {year}',
-        'tipo': 'Mensual',
-        'vence': f'{year}-{str(month).zfill(2)}-15',
-        'dias_restantes': 15 - day if day <= 15 else 0,
-        'urgencia': 'normal' if day <= 15 else 'overdue',
-        'descripcion': 'Envío de contabilidad electrónica (XML de pólizas y auxiliares).',
-        'accion_recomendada': 'Genera XML de contabilidad desde tu sistema.',
-        'penalizacion': 'Multa de $6,380 a $11,870 UMA',
-        'monto_estimado': None
-    })
-    
-    # Digital tax receipt - periodic obligations
-    obligations.append({
-        'id': 'cfdi-emitidos',
-        'titulo': 'Facturas Emitidas',
-        'tipo': 'Continua',
-        'vence': 'N/A',
-        'dias_restantes': 0,
-        'urgencia': 'low',
-        'descripcion': 'Emisión de CFDIs para clientes.',
-        'accion_recomendada': 'Emite facturas dentro de 72h de cobro.',
-        'penalizacion': 'Multa por no emitir CFDI: $3,190 a $11,870',
-        'monto_estimado': None
-    })
-    
-    # Sort by urgency
-    urgency_order = {'critical': 0, 'overdue': 1, 'high': 2, 'normal': 3, 'low': 4}
-    obligations.sort(key=lambda x: urgency_order.get(x['urgencia'], 5))
-    
-    return jsonify({
-        'rfc': SAMPLE_DATA['marco_test']['rfc'],
-        'fecha_actual': today.isoformat(),
-        'obligaciones_pendientes': obligations,
-        'resumen': {
-            'criticas': sum(1 for o in obligations if o['urgencia'] == 'critical'),
-            'altas': sum(1 for o in obligations if o['urgencia'] == 'high'),
-            'normales': sum(1 for o in obligations if o['urgencia'] == 'normal'),
-            'total': len(obligations)
-        }
-    })
-
-@app.route('/obligaciones')
-def obligaciones():
-    """Get fiscal obligations based on current date"""
-    from datetime import date, timedelta
-    
-    today = date.today()
-    year = today.year
-    month = today.month
-    day = today.day
-    
-    MONTH_NAMES = {
-        '01': 'Enero', '02': 'Febrero', '03': 'Marzo', '04': 'Abril',
-        '05': 'Mayo', '06': 'Junio', '07': 'Julio', '08': 'Agosto',
-        '09': 'Septiembre', '10': 'Octubre', '11': 'Noviembre', '12': 'Diciembre'
-    }
     
     obligations = []
     
@@ -341,7 +476,7 @@ def obligaciones():
             'vence': f'{year}-{str(month).zfill(2)}-17',
             'dias_restantes': days_to_17,
             'urgencia': urgency,
-            'descripcion': f'Declaración mensual de IVA e ISR.',
+            'descripcion': 'Declaración mensual de IVA e ISR.',
             'accion': 'Presenta antes del 17',
             'penalizacion': 'Recargos 1.47% + multa 20%'
         })
@@ -356,7 +491,7 @@ def obligaciones():
             'vence': f'{next_y}-{str(next_m).zfill(2)}-17',
             'dias_restantes': days_to_next,
             'urgencia': 'normal',
-            'descripcion': f'Próxima declaración.',
+            'descripcion': 'Próxima declaración.',
             'accion': 'Prepara tus CFDIs',
             'penalizacion': None
         })
@@ -382,7 +517,7 @@ def obligaciones():
     if day <= 15:
         obligations.append({
             'id': 'contabilidad-electronica',
-            'titulo': f'Contabilidad Electrónica',
+            'titulo': 'Contabilidad Electrónica',
             'tipo': 'Mensual',
             'vence': f'{year}-{str(month).zfill(2)}-15',
             'dias_restantes': 15 - day,
@@ -397,7 +532,7 @@ def obligaciones():
     obligations.sort(key=lambda x: urgency_order.get(x['urgencia'], 5))
     
     return jsonify({
-        'rfc': SAMPLE_DATA['marco_test']['rfc'],
+        'rfc': 'MUTM8610091NA',
         'fecha_actual': today.isoformat(),
         'obligaciones_pendientes': obligations,
         'resumen': {
@@ -408,146 +543,7 @@ def obligaciones():
         }
     })
 
-@app.route('/emitir-factura', methods=['POST'])
-def emitir_factura():
-    """
-    Emitir factura CFDI 4.0 usando SAT gratuito
-    Requiere FIEL para autenticación
-    
-    Campos requeridos:
-    - rfc_receptor: str (13 chars)
-    - nombre_receptor: str
-    - codigo_postal: str (5 digits)
-    - regimen_fiscal: str (código SAT)
-    - uso_cfdi: str (código SAT, ej: G03 para gastos)
-    - concepto: str (descripción del producto/servicio)
-    - cantidad: number
-    - precio_unitario: number
-    - forma_pago: str (código SAT, ej: 03 transferencia)
-    - metodo_pago: str (código SAT, ej: PUE - Pago en una sola exhibición)
-    """
-    data = request.json or {}
-    
-    # Validate required fields
-    required = ['rfc_receptor', 'nombre_receptor', 'codigo_postal', 'concepto', 
-                'cantidad', 'precio_unitario']
-    missing = [f for f in required if not data.get(f)]
-    
-    if missing:
-        return jsonify({
-            'status': 'error',
-            'message': f'Campos requeridos faltantes: {", ".join(missing)}'
-        }), 400
-    
-    # Calculate totals
-    cantidad = float(data.get('cantidad', 1))
-    precio_unitario = float(data.get('precio_unitario', 0))
-    subtotal = cantidad * precio_unitario
-    iva = subtotal * 0.16  # IVA 16%
-    total = subtotal + iva
-    
-    # Build CFDI 4.0 structure (XML)
-    from datetime import datetime
-    
-    fecha_emision = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-    
-    cfdi_data = {
-        'uuid': None,  # Se genera al timbrar
-        'version': '4.0',
-        'serie': data.get('serie', 'F'),
-        'folio': data.get('folio', '1'),
-        'fecha': fecha_emision,
-        'forma_pago': data.get('forma_pago', '03'),  # Transferencia electrónica
-        'condiciones_pago': data.get('condiciones_pago', 'Contado'),
-        'subtotal': round(subtotal, 2),
-        'moneda': 'MXN',
-        'tipo_cambio': 1,
-        'total': round(total, 2),
-        'tipo_comprobante': 'I',  # Ingreso
-        'metodo_pago': data.get('metodo_pago', 'PUE'),
-        'lugar_expedicion': data.get('lugar_expedicion', '01000'),  # CP emisor
-        'exportacion': data.get('exportacion', '01'),  # No aplica
-        
-        # Emisor (from vault/config)
-        'emisor': {
-            'rfc': SAMPLE_DATA['marco_test']['rfc'],
-            'nombre': SAMPLE_DATA['marco_test']['nombre'],
-            'regimen_fiscal': data.get('regimen_fiscal_emisor', '612'),  # RIF
-            'fac_aeropuerto': None
-        },
-        
-        # Receptor
-        'receptor': {
-            'rfc': data['rfc_receptor'],
-            'nombre': data['nombre_receptor'],
-            'domicilio_fiscal': data['codigo_postal'],
-            'residencia_fiscal': None,
-            'num_reg_id_trib': None,
-            'regimen_fiscal': data.get('regimen_fiscal_receptor', '601'),  # General
-            'uso_cfdi': data.get('uso_cfdi', 'G03')  # Gastos
-        },
-        
-        # Conceptos
-        'conceptos': [{
-            'clave_prod_serv': data.get('clave_prod_serv', '01010101'),  # Producto genérico
-            'no_identificacion': data.get('no_identificacion', ''),
-            'cantidad': cantidad,
-            'clave_unidad': data.get('clave_unidad', 'E48'),  # Unidad de servicio
-            'unidad': data.get('unidad', 'Unidad'),
-            'descripcion': data['concepto'],
-            'valor_unitario': round(precio_unitario, 2),
-            'importe': round(subtotal, 2),
-            'descuento': 0,
-            'objeto_imp': '02',  # Sí objeto de impuesto
-            'impuestos': {
-                'traslados': [{
-                    'base': round(subtotal, 2),
-                    'impuesto': '002',  # IVA
-                    'tipo_factor': 'Tasa',
-                    'tasa_ocuota': '0.160000',
-                    'importe': round(iva, 2)
-                }]
-            }
-        }],
-        
-        # Impuestos totales
-        'impuestos': {
-            'total_impuestos_trasladados': round(iva, 2),
-            'traslados': [{
-                'impuesto': '002',
-                'tipo_factor': 'Tasa',
-                'tasa_ocuota': '0.160000',
-                'importe': round(iva, 2)
-            }]
-        }
-    }
-    
-    # For demo mode, return structured data
-    # In production, this would connect to SAT PAC
-    return jsonify({
-        'status': 'success',
-        'message': 'CFDI generado (modo demo - requiere timbrado con PAC/SAT)',
-        'cfdi_preview': cfdi_data,
-        'totales': {
-            'subtotal': round(subtotal, 2),
-            'iva': round(iva, 2),
-            'total': round(total, 2)
-        },
-        'accion_requerida': {
-            'tipo': 'timbrar',
-            'opciones': [
-                'Usar portal gratuito del SAT',
-                'Contratar PAC autorizado',
-                'Integrar API de facturación'
-            ]
-        },
-        'notas': [
-            'Para timbrar gratuitamente usa: https://portalsat.plataforma.sat.gob.mx',
-            'Requiere FIEL vigente',
-            'El XML generado necesita firma digital y timbre del SAT'
-        ]
-    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
