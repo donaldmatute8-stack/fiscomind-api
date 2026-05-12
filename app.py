@@ -174,6 +174,37 @@ def cancelar():
         "motivo": data.get('motivo')
     })
 
+@app.route('/summary')
+def summary():
+    """Get fiscal summary"""
+    user_id = request.args.get('user_id', 'default')
+    data = SAMPLE_DATA.get(user_id, SAMPLE_DATA['marco_test'])
+    
+    recibidos = data['cfdis_recibidos']
+    emitidos = data['cfdis_emitidos']
+    
+    # Calculate emisores stats
+    emisores = {}
+    for c in recibidos:
+        name = c['nombre_emisor'][:40]
+        if name not in emisores:
+            emisores[name] = {'count': 0, 'total': 0}
+        emisores[name]['count'] += 1
+        emisores[name]['total'] += c['monto']
+    
+    return jsonify({
+        "rfc": data['rfc'],
+        "resumen": {
+            "cfdis_vigentes": sum(1 for c in recibidos + emitidos if c['estatus'] == '1'),
+            "cfdis_cancelados": sum(1 for c in recibidos + emitidos if c['estatus'] == '0'),
+            "total_ingresos": sum(c['monto'] for c in recibidos if c['efecto'] == 'I' and c['estatus'] == '1'),
+            "total_egresos": sum(c['monto'] for c in recibidos if c['efecto'] == 'E' and c['estatus'] == '1'),
+            "total_pagos_recibidos": sum(c['monto'] for c in recibidos if c['efecto'] == 'P' and c['estatus'] == '1'),
+            "deduccion_estimada": sum(c['monto'] for c in recibidos if c['efecto'] == 'I' and c['estatus'] == '1') * 0.30
+        },
+        "emisores": emisores
+    })
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
