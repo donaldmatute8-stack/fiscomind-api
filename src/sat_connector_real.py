@@ -93,8 +93,8 @@ class SATConnectorReal:
                     estado_comprobante=EstadoComprobante.TODOS
                 )
             else:
-                # Local uses "issued" not "emitted"
-                result = self.sat.recover_comprobante_issued_request(
+                # satcfdi uses "emitted" not "issued"
+                result = self.sat.recover_comprobante_emitted_request(
                     fecha_inicial=start,
                     fecha_final=end,
                     rfc_emisor=self.rfc,
