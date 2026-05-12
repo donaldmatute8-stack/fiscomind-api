@@ -9,6 +9,7 @@ FiscoMind Railway API v4.1 - Based on working local version
 import os
 import sys
 import json
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict
@@ -311,6 +312,66 @@ def obligaciones():
             'criticas': sum(1 for o in obligations if o['urgencia'] == 'critical'),
             'altas': sum(1 for o in obligations if o['urgencia'] == 'high'),
             'total': len(obligations)
+        }
+    })
+
+@app.route('/complemento-pago', methods=['POST'])
+def complemento_pago():
+    """Generar complemento de pago para una factura PPD"""
+    data = request.json or {}
+    factura_uuid = data.get('factura_uuid')
+    monto_pagado = data.get('monto_pagado', 0)
+    fecha_pago = data.get('fecha_pago')
+    forma_pago = data.get('forma_pago', '03')
+    
+    if not factura_uuid:
+        return jsonify({"status": "error", "message": "UUID de factura requerido"}), 400
+    
+    cache = load_cache()
+    emitidos = cache.get('emitidos', [])
+    
+    # Find the original invoice
+    factura = next((c for c in emitidos if c.get('uuid') == factura_uuid), None)
+    if not factura:
+        return jsonify({"status": "error", "message": "Factura no encontrada"}), 404
+    
+    # Initialize complementos list if not exists
+    if 'complementos' not in factura:
+        factura['complementos'] = []
+    
+    # Calculate total paid so far
+    total_pagado = sum(c.get('monto_pagado', 0) for c in factura.get('complementos', []))
+    total_pagado += float(monto_pagado)
+    
+    # Create complemento record
+    complemento = {
+        'uuid': str(uuid.uuid4()).upper(),
+        'tipo': 'P',
+        'factura_relacionada': factura_uuid,
+        'monto_pagado': float(monto_pagado),
+        'fecha_pago': fecha_pago,
+        'forma_pago': forma_pago,
+        'fecha_generacion': datetime.now().isoformat(),
+        'estatus': '1'
+    }
+    
+    factura['complementos'].append(complemento)
+    
+    # Update payment status
+    factura['total_pagado'] = total_pagado
+    factura['saldo_pendiente'] = float(factura.get('monto', 0)) - total_pagado
+    
+    save_cache(cache)
+    
+    return jsonify({
+        "status": "success",
+        "message": "Complemento de pago generado",
+        "complemento": complemento,
+        "factura": {
+            "uuid": factura_uuid,
+            "total": factura.get('monto'),
+            "pagado": total_pagado,
+            "pendiente": factura['saldo_pendiente']
         }
     })
 
