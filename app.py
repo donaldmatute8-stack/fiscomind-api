@@ -438,3 +438,17 @@ def update_factura_estatus(uuid):
     save_cache(cache)
     return jsonify({"status": "success", "message": f"Estatus actualizado a {new_estatus}", "uuid": uuid})
 
+
+
+# Import Facturama routes
+try:
+    from facturama_routes import facturama_bp
+    app.register_blueprint(facturama_bp, url_prefix='/facturama')
+    logger.info("✅ Facturama routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Facturama routes not loaded: {e}")
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=True)

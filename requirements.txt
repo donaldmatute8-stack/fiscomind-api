@@ -8,3 +8,4 @@ reportlab==4.2.5
 satcfdi==4.9.17
 cryptography==44.0.0
 lxml==6.1.0
+requests==2.32.3
