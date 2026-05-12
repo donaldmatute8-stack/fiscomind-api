@@ -82,22 +82,20 @@ class SATConnectorReal:
     def submit_download_request(self, date_start: str, date_end: str, 
                                    tipo: str = "recibidos",
                                    include_xml: bool = True) -> Dict[str, Any]:
-        """
-        Submit download request to SAT (async). Returns request ID.
-        """
+        """Submit download request to SAT (async)."""
         if not self._is_connected:
             if not self.authenticate():
                 raise ConnectionError("Could not connect to SAT")
         
         logger.info(f"📥 Submitting download request for {tipo} from {date_start} to {date_end}")
         
-        # Parse dates and create date objects
         start = date.fromisoformat(date_start)
         end = date.fromisoformat(date_end)
-        request_type = TipoDescargaMasivaTerceros.CFDI if include_xml else TipoDescargaMasivaTerceros.METADATA
         
         try:
-            # Submit request - SAT API is picky about parameters
+            # Try simplest approach - METADATA first (lighter)
+            request_type = TipoDescargaMasivaTerceros.METADATA
+            
             if tipo == "recibidos":
                 result = self.sat.recover_comprobante_received_request(
                     fecha_inicial=start,
@@ -115,38 +113,33 @@ class SATConnectorReal:
             
             result_dict = to_dict(result)
             
-            # Try different field names that satcfdi might return
             cod_status = (result_dict.get('CodEstatus') or 
-                         result_dict.get('cod_estatus') or 
-                         result_dict.get('codigo'))
+                       result_dict.get('cod_estatus'))
             mensaje = (result_dict.get('Mensaje') or 
-                      result_dict.get('mensaje') or 
-                      result_dict.get('mensaje_error', ''))
+                      result_dict.get('mensaje', ''))
             id_solicitud = (result_dict.get('IdSolicitud') or 
-                           result_dict.get('id_solicitud') or
-                           result_dict.get('solicitud_id'))
+                           result_dict.get('id_solicitud'))
             
             logger.info(f"📨 SAT Response: {cod_status} - {mensaje}")
             
-            # Status 5000 = Accepted, 5004 = No CFDIs found
             if cod_status in ['5000', 5000] and id_solicitud:
-                # Store for later polling
                 self._pending_requests[id_solicitud] = {
                     'id': id_solicitud,
                     'submitted': datetime.now().isoformat(),
                     'date_start': date_start,
                     'date_end': date_end,
                     'tipo': tipo,
+                    'request_type': 'METADATA',
                     'cod_status': cod_status,
                     'mensaje': mensaje
                 }
-                
                 return {
                     "status": "submitted",
                     "id_solicitud": id_solicitud,
                     "cod_status": cod_status,
                     "message": mensaje,
                     "tipo": tipo,
+                    "request_type": "METADATA",
                     "date_range": f"{date_start} to {date_end}"
                 }
             elif cod_status in ['5004', 5004]:
@@ -160,7 +153,7 @@ class SATConnectorReal:
                     "status": "error",
                     "cod_status": cod_status,
                     "message": mensaje,
-                    "raw_response": result_dict
+                    "raw_response": str(result_dict)[:500]
                 }
             
         except Exception as e:

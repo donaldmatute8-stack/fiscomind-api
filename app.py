@@ -157,7 +157,8 @@ def sync():
         return jsonify({"status": "error", "message": "SAT connector no disponible"}), 500
     
     data = request.json or {}
-    date_start = data.get('date_start', (date.today() - timedelta(days=90)).isoformat())
+    # Default: last 7 days
+    date_start = data.get('date_start', (date.today() - timedelta(days=7)).isoformat())
     date_end = data.get('date_end', date.today().isoformat())
     tipo = data.get('tipo', 'recibidos')  # recibidos o emitidos
     
@@ -181,12 +182,12 @@ def sync():
                 'submitted': datetime.now().isoformat()
             }
             save_cache(cache)
-        elif result.get('status') == 'error' and '301' in str(result.get('cod_status', '')):
-            # Try with smaller range if SAT rejects
+        elif result.get('status') == 'error':
             return jsonify({
                 "status": "error",
-                "message": "SAT rechazó la solicitud (rango muy grande). Intenta un rango de 1-7 días.",
-                "sat_error": result
+                "message": f"SAT error: {result.get('message', 'Unknown')}",
+                "cod_status": result.get('cod_status'),
+                "suggestion": "Intenta un rango de fechas menor (3-7 días) o período con facturas vigentes"
             }), 422
         
         return jsonify(result)
