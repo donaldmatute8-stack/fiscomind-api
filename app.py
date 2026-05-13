@@ -1325,49 +1325,166 @@ def complemento_pago():
     )
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=True)
-
-
-@app.route("/factura/<uuid>/estatus", methods=["PATCH"])
-def update_factura_estatus(uuid):
-    """Update invoice status (e.g. mark as cancelled)"""
-    data = request.json or {}
-    new_estatus = data.get("estatus")
-    notas = data.get("notas", "")
-
-    if not new_estatus:
-        return jsonify({"status": "error", "message": "estatus requerido"}), 400
-
-    cache = load_cache()
-    emitidos = cache.get("emitidos", [])
-
-    found = False
-    for f in emitidos:
-        if f.get("uuid", "").upper().startswith(uuid.upper()):
-            f["estatus"] = new_estatus
-            if notas:
-                f["notas"] = notas
-            found = True
-            break
-
-    if not found:
-        return jsonify({"status": "error", "message": "Factura no encontrada"}), 404
-
-    save_cache(cache)
-    return jsonify(
-        {
-            "status": "success",
-            "message": f"Estatus actualizado a {new_estatus}",
-            "uuid": uuid,
-        }
+# Fix: remove duplicate __main__ blocks and keep only one at the end
+@app.route("/declaracion/borrador/<tipo>")
+def declaracion_borrador(tipo):
+    """
+    Genera borrador de declaracion en PDF o XML con datos pre-completados.
+    tipo: 'ceros' | 'normal'
+    Query:
+      periodo=YYYY-MM (default: mes anterior)
+      rfc=RFC_EMISOR
+      regimen=612|626
+      formato=pdf|xml (default: pdf)
+    """
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
     )
 
+    periodo = request.args.get(
+        "periodo", (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    )
+    rfc = request.args.get("rfc", "MUTM8610091NA")
+    regimen = request.args.get("regimen", "612")
+    formato = request.args.get("formato", "pdf").lower()
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    cache = load_cache()
+    recibidos = cache.get("recibidos", [])
+    emitidos = cache.get("emitidos", [])
+    cfdis = recibidos + emitidos
+
+    total_ingresos = sum(
+        float(c.get("monto", 0)) for c in cfdis if c.get("efecto") in ("I", "ingreso")
+    )
+    total_egresos = sum(
+        float(c.get("monto", 0)) for c in cfdis if c.get("efecto") in ("E", "egreso")
+    )
+    isr_info = calcular_isr_estimado(total_ingresos, total_egresos, regimen)
+
+    if formato == "xml" and tipo == "ceros":
+        # Genera XML tipo presentacion pre-llenado (formato simplificado del SAT Diot)
+        # Esto no es un XML oficial del SAT, pero organiza los datos segun formato entendible
+        content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<BorradorDeclaracion version="1.0" tipo="{tipo}">
+    <Contribuyente rfc="{rfc}" regimen="{regimen}"/>
+    <Periodo>{periodo}</Periodo>
+    <Ingresos total="{isr_info["ingresos"]:,.2f}"/>
+    <Deducciones total="{isr_info["deducciones"]:,.2f}"/>
+    <BaseGravable>{isr_info["base_gravable"]:,.2f}</BaseGravable>
+    <ISRCalculado>{isr_info["isr_estimado"]:,.2f}</ISRCalculado>
+    <Nota>ESTE ES UN BORRADOR GENERADO POR FISCOMIND. DEBES PRESENTAR EN EL PORTAL OFICIAL DEL SAT.</Nota>
+</BorradorDeclaracion>"""
+        return (
+            content,
+            200,
+            {
+                "Content-Type": "application/xml",
+                "Content-Disposition": f"attachment; filename=borrador_declaracion_{tipo}_{periodo}.xml",
+            },
+        )
+
+    # DEFAULT: PDF
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=72,
+        leftMargin=72,
+        topMargin=72,
+        bottomMargin=18,
+    )
+    elements = []
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle(
+        "Title",
+        parent=styles["Heading1"],
+        fontSize=20,
+        textColor=colors.HexColor("#533483"),
+        spaceAfter=20,
+    )
+    elements.append(Paragraph("FiscoMind — Borrador de Declaración", title))
+    elements.append(
+        Paragraph(f"Contribuyente: {rfc}  |  Periodo: {periodo}", styles["Normal"])
+    )
+    elements.append(Spacer(1, 0.3 * inch))
+
+    if tipo == "ceros":
+        elements.append(
+            Paragraph("<b>TIPO: DECLARACIÓN EN CEROS</b>", styles["Heading2"])
+        )
+        elements.append(
+            Paragraph(
+                "No se detectaron ingresos deducibles para este periodo.",
+                styles["Normal"],
+            )
+        )
+    else:
+        elements.append(
+            Paragraph(f"<b>TIPO: DECLARACIÓN NORMAL</b>", styles["Heading2"])
+        )
+    elements.append(Spacer(1, 0.2 * inch))
+
+    summary_data = [
+        ["Concepto", "Monto"],
+        ["Total Ingresos", f"${isr_info['ingresos']:,.2f}"],
+        ["Total Deducciones", f"${isr_info['deducciones']:,.2f}"],
+        ["Base Gravable", f"${isr_info['base_gravable']:,.2f}"],
+        ["ISR Calculado", f"${isr_info['isr_estimado']:,.2f}"],
+        ["Reserva Mensual", f"${isr_info['reserva_mensual']:,.2f}"],
+    ]
+    table = Table(summary_data, colWidths=[3.5 * inch, 2.5 * inch])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#533483")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 14),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
+                ("GRID", (0, 0), (-1, -1), 1, colors.black),
+            ]
+        )
+    )
+    elements.append(table)
+
+    elements.append(Spacer(1, 0.3 * inch))
+    elements.append(
+        Paragraph(
+            "<b>INSTRUCCIONES PARA PRESENTAR:</b><br/>"
+            + "1. Portal SAT &rarr; Declaraciones y Pagos<br/>"
+            + "2. Selecciona el periodo correspondiente<br/>"
+            + '3. Si es "ceros": selecciona declaración en ceros<br/>'
+            + '4. Si es "normal": captura los montos de este borrador<br/>'
+            + "5. Presenta y guarda el acuse",
+            styles["Normal"],
+        )
+    )
+    elements.append(Spacer(1, 0.2 * inch))
+    elements.append(
+        Paragraph(
+            "<i>Este es un borrador informativo generado por FiscoMind. "
+            "Verifica los datos antes de presentar ante el SAT.</i>",
+            styles["Italic"],
+        )
+    )
+    doc.build(elements)
+    return (
+        buffer.getvalue(),
+        200,
+        {
+            "Content-Type": "application/pdf",
+            "Content-Disposition": f"attachment; filename=borrador_declaracion_{tipo}_{periodo}.pdf",
+        },
+    )
 
 
 @app.route("/simular", methods=["POST"])
@@ -1599,64 +1716,151 @@ def comparar_anios():
     )
 
 
-# Exportación de datos
+# Exportación de datos REALES (archivos descargables)
+
+
 @app.route("/export/<format>")
 def export_data(format):
-    from export_tools import ExportManager, export_cfdis_to_csv
-    from pathlib import Path
-
+    """DESCARGA REAL DE ARCHIVOS: csv, pdf, xlsx"""
     user_id = request.args.get("user_id", "marco_test")
-    user_dir = DATA_DIR / "users" / user_id
 
-    # Cargar CFDIs
-    cfdis = []
-    sync_files = sorted(user_dir.glob("sat_sync_*.json"), reverse=True)
-    for sf in sync_files:
-        try:
-            with open(sf) as f:
-                data = json.load(f)
-            cfdis.extend(data.get("cfdis", []))
-        except:
-            continue
+    cache = load_cache()
+    cfdis = cache.get("recibidos", []) + cache.get("emitidos", [])
+
+    # Filtro opcional: mes, año, tipo
+    filtros = {
+        k: request.args.get(k) for k in ["mes", "anio", "tipo"] if request.args.get(k)
+    }
+    if filtros.get("tipo"):
+        cfdis = [c for c in cfdis if c.get("efecto") == filtros["tipo"]]
+    if filtros.get("mes"):
+        cfdis = [
+            c for c in cfdis if get_mes_fiscal(c.get("fecha_emision")) == filtros["mes"]
+        ]
+    if filtros.get("anio"):
+        cfdis = [
+            c for c in cfdis if c.get("fecha_emision", "").startswith(filtros["anio"])
+        ]
 
     if format == "csv":
+        from export_tools import export_cfdis_to_csv
+
         csv_data = export_cfdis_to_csv(cfdis)
         return (
             csv_data,
             200,
             {
                 "Content-Type": "text/csv",
-                "Content-Disposition": "attachment; filename=cfdis.csv",
+                "Content-Disposition": f"attachment; filename=fiscomind_{user_id}_{datetime.now().strftime('%Y%m%d')}.csv",
             },
         )
 
     elif format == "pdf":
-        import base64
+        from export_tools import generate_pdf_report
 
-        pdf_data = generate_pdf_report(user_id, str(user_dir))
-        if isinstance(pdf_data, bytes):
-            return jsonify(
+        pdf_bytes = generate_pdf_report(user_id=user_id, cfdis=cfdis)
+        if pdf_bytes and isinstance(pdf_bytes, bytes) and len(pdf_bytes) > 100:
+            return (
+                pdf_bytes,
+                200,
                 {
-                    "status": "success",
-                    "pdf": base64.b64encode(pdf_data).decode(),
-                    "generated_at": datetime.now().isoformat(),
-                }
+                    "Content-Type": "application/pdf",
+                    "Content-Disposition": f"attachment; filename=fiscomind_{user_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                },
             )
         else:
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": pdf_data.decode()
-                    if isinstance(pdf_data, bytes)
-                    else str(pdf_data),
-                }
+            return jsonify({"status": "error", "message": "PDF generation failed"}), 500
+
+    elif format == "xlsx":
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "CFDIs"
+            headers = [
+                "UUID",
+                "Tipo",
+                "Estatus",
+                "Emisor",
+                "RFC_Emisor",
+                "Receptor",
+                "RFC_Receptor",
+                "Monto",
+                "Fecha",
+                "Uso CFDI",
+                "Clasificación",
+                "Deducible",
+            ]
+            ws.append(headers)
+            for h in ws[1]:
+                h.font = Font(bold=True)
+                h.fill = PatternFill(
+                    start_color="533483", end_color="533483", fill_type="solid"
+                )
+            for c in cfdis:
+                clasif = clasificar_gasto(c)
+                ws.append(
+                    [
+                        c.get("uuid", ""),
+                        c.get("efecto", ""),
+                        "Vigente" if c.get("estatus") == "1" else "Cancelado",
+                        c.get("nombre_emisor", ""),
+                        c.get("rfc_emisor", ""),
+                        c.get("nombre_receptor", ""),
+                        c.get("rfc_receptor", ""),
+                        float(c.get("monto", 0)),
+                        c.get("fecha_emision", ""),
+                        c.get("uso_cfdi", ""),
+                        clasif.get("clasificacion", ""),
+                        "Sí" if clasif.get("deducible") else "No",
+                    ]
+                )
+            ws.append([])
+            ws.append(["RESUMEN"])
+            ws.append(["Total Registros", len(cfdis)])
+            ws.append(
+                [
+                    "Total Ingresos",
+                    sum(
+                        float(c.get("monto", 0))
+                        for c in cfdis
+                        if c.get("efecto") == "I"
+                    ),
+                ]
             )
+            ws.append(
+                [
+                    "Total Egresos",
+                    sum(
+                        float(c.get("monto", 0))
+                        for c in cfdis
+                        if c.get("efecto") == "E"
+                    ),
+                ]
+            )
+            buffer = io.BytesIO()
+            wb.save(buffer)
+            buffer.seek(0)
+            return (
+                buffer.getvalue(),
+                200,
+                {
+                    "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "Content-Disposition": f"attachment; filename=fiscomind_{user_id}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                },
+            )
+        except ImportError:
+            return jsonify(
+                {"status": "error", "message": "openpyxl no instalado. Usa CSV o PDF."}
+            ), 500
 
     else:
         return jsonify(
             {
                 "status": "error",
-                "message": f"Formato '{format}' no soportado. Use 'csv' o 'pdf'",
+                "message": f"Formato '{format}' no soportado. Use csv, pdf, xlsx",
             }
         ), 400
 

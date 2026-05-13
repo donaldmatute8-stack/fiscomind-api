@@ -53,23 +53,23 @@ async def morning_sync_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Envía recordatorio diario a las 7 AM"""
     job_data = context.job.data
     chat_id = job_data.get("chat_id")
-    
+
     if not chat_id:
         return
-    
+
     keyboard = [
         [InlineKeyboardButton("🔄 Sincronizar ahora", callback_data="morning_sync")],
         [InlineKeyboardButton("📊 Ver mi panorama", callback_data="panorama")],
         [InlineKeyboardButton("⏰ Recordar más tarde", callback_data="snooze")],
     ]
-    
+
     await context.bot.send_message(
         chat_id=chat_id,
         text="☀️*¡Buenos días Marco!*\n\n"
-             "¿Quieres sincronizar tus CFDIs del SAT ahora?\n\n"
-             "_Última sincronización: Revisando..._",
+        "¿Quieres sincronizar tus CFDIs del SAT ahora?\n\n"
+        "_Última sincronización: Revisando..._",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -78,7 +78,7 @@ def setup_morning_jobs(application: Application):
     # Buscar chat_id del usuario principal - asumimos marco_test por ahora
     # En producción esto debería leer de base de datos
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", None)
-    
+
     if chat_id:
         # Recordatorio diario 7 AM
         job_queue = application.job_queue
@@ -87,27 +87,27 @@ def setup_morning_jobs(application: Application):
             time=datetime.time(hour=7, minute=0),
             days=(0, 1, 2, 3, 4, 5, 6),  # Todos los días
             data={"chat_id": int(chat_id)},
-            name="morning_sync"
+            name="morning_sync",
         )
-        
+
         # Alerta de vencimientos - 9 AM
         job_queue.run_daily(
             check_obligations_alert,
             time=datetime.time(hour=9, minute=0),
             days=(0, 1, 2, 3, 4, 5, 6),
             data={"chat_id": int(chat_id)},
-            name="obligations_alert"
+            name="obligations_alert",
         )
-        
+
         # Alerta urgente - 3 PM
         job_queue.run_daily(
             urgent_obligations_alert,
             time=datetime.time(hour=15, minute=0),
             days=(0, 1, 2, 3, 4, 5, 6),
             data={"chat_id": int(chat_id)},
-            name="urgent_alert"
+            name="urgent_alert",
         )
-        
+
         logger.info(f"✅ Jobs configurados para chat_id: {chat_id}")
 
 
@@ -115,38 +115,36 @@ async def check_obligations_alert(context: ContextTypes.DEFAULT_TYPE):
     """Alerta diaria de obligaciones fiscales"""
     job_data = context.job.data
     chat_id = job_data.get("chat_id")
-    
+
     if not chat_id:
         return
-    
+
     try:
         r = api_get("/obligaciones")
         obligations = r.get("obligaciones_pendientes", [])
-        
+
         urgent = [o for o in obligations if o.get("dias_restantes", 999) <= 3]
         high = [o for o in obligations if 3 < o.get("dias_restantes", 999) <= 7]
-        
+
         if urgent or high:
             text = "🔴 *ALERTAS FISCALES* 🔴\n\n"
-            
+
             if urgent:
                 text += "*🚨 URGENTE (≤3 días):*\n"
                 for o in urgent:
                     text += f"• {h(o.get('titulo', ''))} - {o.get('dias_restantes', '?')} días restantes\n"
                 text += "\n"
-            
+
             if high:
                 text += "*⚠️ PRÓXIMOS (4-7 días):*\n"
                 for o in high:
                     text += f"• {h(o.get('titulo', ''))} - {o.get('dias_restantes', '?')} días restantes\n"
                 text += "\n"
-            
+
             text += "_Usa /obligaciones para ver detalles o /help para más opciones._"
-            
+
             await context.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="Markdown"
+                chat_id=chat_id, text=text, parse_mode="Markdown"
             )
     except Exception as e:
         logger.error(f"Error en alerta: {e}")
@@ -156,28 +154,28 @@ async def urgent_obligations_alert(context: ContextTypes.DEFAULT_TYPE):
     """Alerta urgente de última hora (3 PM)"""
     job_data = context.job.data
     chat_id = job_data.get("chat_id")
-    
+
     if not chat_id:
         return
-    
+
     try:
         r = api_get("/obligaciones")
         obligations = r.get("obligaciones_pendientes", [])
         critical = [o for o in obligations if o.get("dias_restantes", 999) <= 1]
-        
+
         if critical:
             text = f"⏰ *URGENTE - VENCE MAÑANA O HOY* ⏰\n\n"
             for o in critical:
                 text += f"• {h(o.get('titulo', ''))}\n"
                 text += f"  Vence: {o.get('vence', '')}\n"
                 text += f"  Acción: {h(o.get('accion', ''))}\n\n"
-            
-            text += "⚠️ *No olvides presentar tu declaración para evitar multas y recargos.*"
-            
+
+            text += (
+                "⚠️ *No olvides presentar tu declaración para evitar multas y recargos.*"
+            )
+
             await context.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="Markdown"
+                chat_id=chat_id, text=text, parse_mode="Markdown"
             )
     except Exception as e:
         logger.error(f"Error en alerta urgente: {e}")
@@ -186,7 +184,7 @@ async def urgent_obligations_alert(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    
+
     text = (
         "🤖 \u003cb\u003eHola, soy FiscoMind\u003c/b\u003e 📊💰\n\n"
         "Tu contador AI inteligente para el SAT (desde 2022).\n\n"
@@ -205,7 +203,9 @@ async def start(update: Update, context):
         "• Consultoría SAT 2026 legal\n"
         "• Detección de rezago de declaraciones\n"
         "\n"
-        "\u003cb\u003e📱 Mini App:\u003c/b\u003e \u003ca href='" + WEBAPP + "'\u003eAbrir\u003c/a\u003e\n\n"
+        "\u003cb\u003e📱 Mini App:\u003c/b\u003e \u003ca href='"
+        + WEBAPP
+        + "'\u003eAbrir\u003c/a\u003e\n\n"
         "_Soy más inteligente que Konta. Me conecto al SAT en tiempo real._"
     )
     kb = [
@@ -341,22 +341,234 @@ async def estrategia(update: Update, context):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
-async def sync_sat(update: Update, context):
-    today = date.today()
-    start = (today - timedelta(days=30)).isoformat()
-    r = api_post(
-        "/sync",
-        {"date_start": start, "date_end": today.isoformat(), "tipo": "recibidos"},
-    )
-    if r.get("status") == "submitted":
-        await update.message.reply_text(
-            f"📥 Sync iniciada ✅\n\nID: <code>{h(r['id_solicitud'])}</code>\nSAT procesa en 30-60s.",
-            parse_mode="HTML",
-        )
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    WebAppInfo,
+    InputFile,
+)
+
+# ─── Generación de factura inline (flujo conversacional) ───
+EMITIR_FLOW = {}
+
+
+async def cmd_export(update: Update, context):
+    """Exporta datos reales como archivo descargable"""
+    args = context.args or ["csv"]
+    fmt = args[0].lower()
+    if fmt not in ("csv", "pdf", "xlsx"):
+        fmt = "csv"
+    filters = {}
+    if len(args) > 1:
+        # /export csv 2026-05  -> mes
+        filters["mes"] = args[1]
+    if len(args) > 2:
+        filters["anio"] = args[2]
+
+    url = f"/export/{fmt}?"
+    url += "&".join(f"{k}={v}" for k, v in filters.items())
+
+    await update.message.reply_text(f"📤 Generando {fmt.upper()}...", parse_mode="HTML")
+
+    try:
+        r = client.get(url)
+        if r.status_code == 200:
+            filename = f"fiscomind_{fmt}_{date.today().strftime('%Y%m%d')}.{fmt if fmt != 'xlsx' else 'xlsx'}"
+            buffer = io.BytesIO(r.content)
+            buffer.name = filename
+            if fmt == "csv":
+                await update.message.reply_document(
+                    document=InputFile(buffer, filename=filename),
+                    caption="📄 CFDIs exportados",
+                )
+            elif fmt == "pdf":
+                await update.message.reply_document(
+                    document=InputFile(buffer, filename=filename),
+                    caption="📊 Reporte fiscal",
+                )
+            else:
+                await update.message.reply_document(
+                    document=InputFile(buffer, filename=filename),
+                    caption="📈 Resumen fiscal",
+                )
         else:
-            await update.message.reply_text(
-                f"❌ Error: {h(str(r.get('message', r)))}", parse_mode="HTML"
+            error = r.json().get("message", "Error")
+            await update.message.reply_text(f"❌ Error: {error}", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error de conexión: {str(e)}", parse_mode="HTML"
+        )
+
+
+async def cmd_declarar(update: Update, context):
+    """
+    Genera borrador de declaración LISTO como archivo descargable.
+    No solo instrucciones — el bot genera el PDF con tus datos reales.
+    """
+    args = context.args or []
+    if not args:
+        text = (
+            "📋 <b>DECLARACIONES — BORRADOR REAL</b>\n\n"
+            "Te genero un borrador con TUS DATOS del SAT:\n\n"
+            "• /declarar ceros \u003e PDF listo para presentar en ceros\n"
+            "• /declarar normal \u003e PDF con tus ingresos reales\n"
+            "• /declarar regularizar \u003e Plan de regularización\n\n"
+            "📎 El bot te envía el archivo, tú solo lo subes al SAT."
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    tipo = args[0].lower()
+    mes = (
+        args[1]
+        if len(args) > 1
+        else (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    )
+
+    await update.message.reply_text(
+        f"📄 Generando borrador de {tipo} para {mes}...", parse_mode="HTML"
+    )
+
+    try:
+        r = client.get(f"/declaracion/borrador/{tipo}?periodo={mes}")
+        if r.status_code == 200:
+            filename = f"borrador_{tipo}_{mes}.pdf"
+            buffer = io.BytesIO(r.content)
+            buffer.name = filename
+            await update.message.reply_document(
+                document=InputFile(buffer, filename=filename),
+                caption=f"📎 Borrador de declaración {tipo}\nPeriodo: {mes}\n\n"
+                f"<i>Presenta este borrador en el SAT con los datos aquí indicados.</i>",
+                parse_mode="HTML",
             )
+        else:
+            error = r.json().get("message", "Error")
+            await update.message.reply_text(f"❌ Error: {error}", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}", parse_mode="HTML")
+
+
+async def emitir_start(update: Update, context):
+    """Inicia flujo de emisión de factura"""
+    chat_id = update.effective_chat.id
+    EMITIR_FLOW[chat_id] = {"step": "rfc_receptor"}
+    await update.message.reply_text(
+        "📝 <b>CREAR FACTURA CFDI 4.0</b>\n\nPaso 1/5: Envíame el RFC del receptor:",
+        parse_mode="HTML",
+    )
+
+
+async def emitir_handler(update: Update, context):
+    """Maneja las respuestas del flujo de emisión"""
+    chat_id = update.effective_chat.id
+    flow = EMITIR_FLOW.get(chat_id)
+    if not flow:
+        return  # No está en flujo
+
+    text = update.message.text
+    step = flow.get("step")
+
+    if step == "rfc_receptor":
+        flow["rfc_receptor"] = text.strip().upper()
+        flow["step"] = "nombre_receptor"
+        await update.message.reply_text("Paso 2/5: Nombre del receptor:")
+    elif step == "nombre_receptor":
+        flow["nombre_receptor"] = text.strip()
+        flow["step"] = "concepto"
+        await update.message.reply_text("Paso 3/5: Concepto del servicio/producto:")
+    elif step == "concepto":
+        flow["concepto"] = text.strip()
+        flow["step"] = "monto"
+        await update.message.reply_text("Paso 4/5: Monto total (sin IVA):")
+    elif step == "monto":
+        try:
+            flow["monto"] = float(text.replace(",", "").replace("$", ""))
+            flow["step"] = "confirmar"
+
+            # Preview
+            preview = (
+                f"📋 <b>Resumen de la factura:</b>\n\n"
+                f"Receptor: {flow['nombre_receptor']}\n"
+                f"RFC: {flow['rfc_receptor']}\n"
+                f"Concepto: {flow['concepto']}\n"
+                f"Monto: ${flow['monto']:,.2f}\n"
+                f"IVA (16%): ${flow['monto'] * 0.16:,.2f}\n"
+                f"Total: ${flow['monto'] * 1.16:,.2f}\n\n"
+                f"¿Confirmar y timbrar? Responde: <b>SI</b> o <b>NO</b>"
+            )
+            await update.message.reply_text(preview, parse_mode="HTML")
+        except ValueError:
+            await update.message.reply_text("❌ Monto inválido. Envía solo números:")
+    elif step == "confirmar":
+        if text.upper() == "SI":
+            # Timbrar real
+            await update.message.reply_text("⏳ Conectando con SAT para timbrar...")
+            try:
+                resp = api_post(
+                    "/timbrar",
+                    {
+                        "emisor": {
+                            "rfc": "MUTM8610091NA",
+                            "nombre": "MARCO ARTURO MUÑOZ DEL TORO",
+                            "regimen_fiscal": "612",
+                        },
+                        "receptor": {
+                            "rfc": flow["rfc_receptor"],
+                            "nombre": flow["nombre_receptor"],
+                            "uso_cfdi": "G03",
+                        },
+                        "conceptos": [
+                            {
+                                "descripcion": flow["concepto"],
+                                "cantidad": 1,
+                                "precio_unitario": flow["monto"],
+                                "impuestos": {
+                                    "traslados": [
+                                        {
+                                            "base": flow["monto"],
+                                            "impuesto": "002",
+                                            "tipo_factor": "Tasa",
+                                            "tasa": "0.16",
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "total": flow["monto"] * 1.16,
+                        "forma_pago": "03",
+                        "metodo_pago": "PUE",
+                    },
+                )
+                if resp.get("status") == "success":
+                    uuid = resp.get("uuid", "")
+                    xml = resp.get("xml", "")
+                    if xml:
+                        xml_bytes = (
+                            base64.b64decode(xml) if "," not in xml else xml.encode()
+                        )
+                        buffer = io.BytesIO(xml_bytes)
+                        buffer.name = f"CFDI_{uuid}.xml"
+                        await update.message.reply_document(
+                            document=InputFile(buffer, filename=f"CFDI_{uuid}.xml"),
+                            caption=f"✅ <b>Factura timbrada</b>\nUUID: <code>{uuid}</code>",
+                        )
+                    else:
+                        await update.message.reply_text(f"✅ Timbrada: {uuid}")
+                else:
+                    await update.message.reply_text(
+                        f"❌ Error SAT: {resp.get('message', '')}"
+                    )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+            finally:
+                EMITIR_FLOW.pop(chat_id, None)
+        else:
+            await update.message.reply_text("❌ Cancelado.")
+            EMITIR_FLOW.pop(chat_id, None)
+
+
+# ─── Bot entrypoint ───
 
 
 async def timbrar(update: Update, context):
@@ -373,7 +585,9 @@ async def timbrar(update: Update, context):
         "<i>El timbrado es gratuito vía SAT.</i>"
     )
     kb = [[InlineKeyboardButton("🌐 Mini App", web_app=WebAppInfo(url=WEBAPP))]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    await update.message.reply_text(
+        text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+    )
 
 
 async def cmd_cancelar(update: Update, context):
@@ -391,21 +605,21 @@ async def cmd_cancelar(update: Update, context):
         )
         await update.message.reply_text(text, parse_mode="HTML")
         return
-    
+
     uuid = args[0].upper()
     r = api_post("/cancelar", {"uuid": uuid})
-    
+
     if r.get("status") == "success":
         await update.message.reply_text(
             f"✅ <b>CFDI Cancelado</b>\n\nUUID: <code>{h(uuid)}</code>\n\nLa cancelación se registró.",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
     elif r.get("status") == "pending":
         await update.message.reply_text(
             f"⏳ <b>Solicitud Enviada</b>\n\n"
             f"UUID: <code>{h(uuid)}</code>\n\n"
             "La cancelación requiere aceptación del receptor según las reglas SAT.",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
     else:
         await update.message.reply_text(
@@ -416,7 +630,9 @@ async def cmd_cancelar(update: Update, context):
 async def cmd_estado(update: Update, context):
     args = context.args
     if not args:
-        await update.message.reply_text("❌ Sintaxis: <code>/estado UUID</code>", parse_mode="HTML")
+        await update.message.reply_text(
+            "❌ Sintaxis: <code>/estado UUID</code>", parse_mode="HTML"
+        )
         return
     uuid = args[0].upper()
     r = api_get(f"/estado-cfdi/{uuid}")
@@ -424,9 +640,14 @@ async def cmd_estado(update: Update, context):
         estado = r.get("estado", "desconocido")
         valido = r.get("valido", False)
         emoji = "✅" if valido else "❌"
-        await update.message.reply_text(f"{emoji} <b>Estado CFDI</b>\n\nUUID: <code>{h(uuid)}</code>\nEstado: {estado}", parse_mode="HTML")
+        await update.message.reply_text(
+            f"{emoji} <b>Estado CFDI</b>\n\nUUID: <code>{h(uuid)}</code>\nEstado: {estado}",
+            parse_mode="HTML",
+        )
     else:
-        await update.message.reply_text(f"❌ {h(str(r.get('message', 'Error')))}", parse_mode="HTML")
+        await update.message.reply_text(
+            f"❌ {h(str(r.get('message', 'Error')))}", parse_mode="HTML"
+        )
 
 
 async def cmd_obligaciones(update: Update, context):
@@ -474,19 +695,23 @@ async def cmd_optimize(update: Update, context):
     """Comando /optimizar - Sugerencias de optimización fiscal"""
     r = api_get("/optimize/suggestions")
     if r.get("status") == "error":
-        await update.message.reply_text(f"❌ {h(str(r.get('message', 'Error')))}", parse_mode="HTML")
+        await update.message.reply_text(
+            f"❌ {h(str(r.get('message', 'Error')))}", parse_mode="HTML"
+        )
         return
-    
+
     sugerencias = r.get("sugerencias", [])
     total = r.get("total_gastos", 0)
-    
+
     text = "📊 <b>Optimización Fiscal</b>\n\n"
     text += f"Gastos registrados: ${total:,.2f}\n\n"
-    
+
     for s in sugerencias:
-        emoji = {"info": "ℹ️", "warning": "⚠️", "alert": "🔴"}.get(s.get("tipo", ""), "📌")
+        emoji = {"info": "ℹ️", "warning": "⚠️", "alert": "🔴"}.get(
+            s.get("tipo", ""), "📌"
+        )
         text += f"{emoji} <b>{s.get('titulo', '')}</b>\n{h(s.get('mensaje', ''))}\n\n"
-    
+
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -494,12 +719,14 @@ async def cmd_proyeccion(update: Update, context):
     """Comando /proyeccion - Proyección de ISR"""
     r = api_get("/optimize/projection")
     if r.get("status") == "error":
-        await update.message.reply_text(f"❌ {h(str(r.get('message', 'Error')))}", parse_mode="HTML")
+        await update.message.reply_text(
+            f"❌ {h(str(r.get('message', 'Error')))}", parse_mode="HTML"
+        )
         return
-    
+
     proy = r.get("proyeccion", {})
     actual = r.get("actual", {})
-    
+
     text = "📈 <b>Proyección ISR</b>\n\n"
     text += f"<b>Trimestre Actual:</b>\n"
     text += f"Ingresos: ${actual.get('ingresos', 0):,.2f}\n"
@@ -508,7 +735,7 @@ async def cmd_proyeccion(update: Update, context):
     text += f"<b>Proyección Anual:</b>\n"
     text += f"ISR proyectado: ${proy.get('isr_proyectado', 0):,.2f}\n"
     text += f"Pago trimestral: ${proy.get('pago_trimestral_estimado', 0):,.2f}"
-    
+
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -516,18 +743,20 @@ async def cmd_sugerir(update: Update, context):
     """Comando /sugerir - Consejo rápido de ahorro"""
     r = api_get("/optimize/suggestions")
     sugerencias = r.get("sugerencias", [])
-    
+
     if sugerencias:
         s = sugerencias[0]
-        emoji = {"info": "ℹ️", "warning": "⚠️", "alert": "🔴"}.get(s.get("tipo", ""), "📌")
+        emoji = {"info": "ℹ️", "warning": "⚠️", "alert": "🔴"}.get(
+            s.get("tipo", ""), "📌"
+        )
         await update.message.reply_text(
             f"{emoji} <b>{s.get('titulo', '')}</b>\n{h(s.get('mensaje', ''))}",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
     else:
         await update.message.reply_text(
             "📭 No hay sugerencias por ahora. Sincroniza tus CFDIs primero.",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
 
 
@@ -631,7 +860,7 @@ async def button(update: Update, context):
     elif d == "snooze":
         await q.message.edit_text(
             "⏰ Se pospuso la sincronización. Usa /sync cuando estés listo.",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
     elif d == "export":
         text = (
@@ -667,27 +896,29 @@ async def button(update: Update, context):
 
 async def cmd_panorama(update: Update, context):
     """Comando /panorama - Visión completa de tu situación fiscal"""
-    await update.message.reply_text("📊 Generando tu panorama fiscal...", parse_mode="HTML")
-    
+    await update.message.reply_text(
+        "📊 Generando tu panorama fiscal...", parse_mode="HTML"
+    )
+
     # Obtener datos del dashboard y obligaciones
     dash = api_get("/dashboard")
     summary = dash.get("summary", {})
     ult_sync = dash.get("last_sync", "Nunca")
-    
+
     # Get obligations
     obl = api_get("/obligaciones")
     obligaciones = obl.get("obligaciones_pendientes", [])
-    
+
     # Get optimization
     opt = api_get("/optimize/suggestions")
     sugerencias = opt.get("sugerencias", [])
-    
+
     # Get projection
     proy = api_get("/optimize/projection")
     isr_proy = proy.get("proyeccion_anual", {}).get("isr_anual_estimado", 0)
-    
+
     text = "🎯 <b>TU PANORAMA FISCAL</b>\n\n"
-    
+
     # Resumen
     text += f"📥 Última sync: {ult_sync[:10] if ult_sync else 'Nunca'}\n"
     text += f"📄 CFDIs: {summary.get('total_recibidos', 0)} recibidos | {summary.get('total_emitidos', 0)} emitidos\n"
@@ -695,131 +926,38 @@ async def cmd_panorama(update: Update, context):
     text += f"💸 Egresos: ${summary.get('total_egresos', 0):,.2f}\n"
     text += f"📉 Deducible: ${summary.get('total_deducible', 0):,.2f}\n"
     text += f"🔴 ISR Estimado Anual: ${isr_proy:,.2f}\n\n"
-    
+
     # Obligaciones
     if obligaciones:
-        urgentes = [o for o in obligaciones if o.get('dias_restantes', 999) <= 3]
+        urgentes = [o for o in obligaciones if o.get("dias_restantes", 999) <= 3]
         if urgentes:
             text += "🚨 <b>OBLIGACIONES URGENTES:</b>\n"
             for o in urgentes[:3]:
                 text += f"• {h(o.get('titulo', ''))} ({o.get('dias_restantes', '?')} días)\n"
             text += "\n"
-    
+
     # Sugerencias principales
     if sugerencias:
         text += "💡 <b>SUGERENCIAS:</b>\n"
         for s in sugerencias[:3]:
             text += f"• {h(s.get('titulo', ''))}\n"
         text += "\n"
-    
+
     # Opciones
     text += "<b>Opciones:</b>\n"
     text += "• /declarar - Ayuda para declarar en ceros\n"
     text += "• /baja - Suspender temporalmente\n"
     text += "• /optimizar - Ver todas las sugerencias\n"
     text += "• /proyeccion - Ver ISR proyectado\n"
-    
+
     await update.message.reply_text(text, parse_mode="HTML")
-
-
-async def cmd_declarar(update: Update, context):
-    """Comando /declarar - Ayuda para declarar"""
-    args = context.args
-    
-    if not args or args[0].lower() not in ['ceros', 'normal']:
-        text = (
-            "📋 <b>DECLARACIONES</b>\n\n"
-            "¿Qué tipo de declaración necesitas?\n\n"
-            "1️⃣ <b>/declarar ceros</b>\n"
-            "   Para cuando NO tuviste ingresos en el periodo\n\n"
-            "2️⃣ <b>/declarar normal</b>\n"
-            "   Para declarar con datos reales\n\n"
-            "3️⃣ <b>/declarar regularizar</b>\n"
-            "   Si tienes rezago y quieres regularizar (desde 2022)\n\n"
-            "❓ Elige con el comando correspondiente."
-        )
-        await update.message.reply_text(text, parse_mode="HTML")
-        return
-    
-    tipo = args[0].lower()
-    
-    if tipo == 'ceros':
-        # Analizar si puede declarar en ceros
-        dash = api_get("/dashboard")
-        tiene_ingresos = dash.get("summary", {}).get("total_ingresos", 0) > 0
-        
-        if tiene_ingresos:
-            text = (
-                "❌ <b>NO puedes declarar en ceros</b>\n\n"
-                "Tienes ingresos registrados (${:.2f}). Declarar en ceros con ingresos es ilegal.\n\n"
-                "💡 <b>Recomendación:</b>\n"
-                "Usa /declarar normal para presentar tu declaración con datos reales.\n\n"
-                "Si necesitas ayuda: /sugerir"
-            ).format(dash.get("summary", {}).get("total_ingresos", 0))
-        else:
-            text = (
-                "✅ <b>Declaración en CEROS</b>\n\n"
-                "No detectamos ingresos en el periodo. Puedes declarar en ceros.\n\n"
-                "📝 <b>¿Cómo hacerlo?</b>"
-                "1. Portal SAT → Declaraciones y Pagos\n"
-                "2. Selecciona el periodo correspondiente\n"
-                "3. Declaración en Ceros (automática)\n"
-                "4. Presentar y guardar acuse\n\n"
-                "⚠️ <b>IMPORTANTE:</b>\n"
-                "Si es primera vez que declaras en ceros, asegúrate de que tus ingresos sean realmente 0.\n"
-                "Si tuviste ingresos pero no facturaste, DEBES declararlos."
-            )
-        
-        await update.message.reply_text(text, parse_mode="HTML")
-    
-    elif tipo == 'normal':
-        text = (
-            "📊 <b>DECLARACIÓN NORMAL</b>\n\n"
-            "Para declarar con datos reales:\n\n"
-            "1️⃣ <b>Sincroniza CFDIs</b>\n"
-            "   /sync\n"
-            "   Esto descarga tus facturas del SAT\n\n"
-            "2️⃣ <b>Revisa tu panorama</b>\n"
-            "   /panorama\n"
-            "   Verás ingresos, egresos e ISR estimado\n\n"
-            "3️⃣ <b>Optimiza deducciones</b>\n"
-            "   /optimizar\n"
-            "   Verás qué más puedes deducir\n\n"
-            "4️⃣ <b>Calcula ISR</b>\n"
-            "   /proyeccion\n"
-            "   Verás cuánto debes reservar\n\n"
-            "5️⃣ <b>Portal SAT</b>\n"
-            "   sat.gob.mx → Declaraciones\n"
-            "   Usa los datos de FiscoMind como referencia"
-        )
-        await update.message.reply_text(text, parse_mode="HTML")
-    
-    elif tipo == 'regularizar':
-        text = (
-            "🔴 <b>REGULARIZACIÓN</b>\n\n"
-            "Para regularizar declaraciones rezagadas (2022 a 2025):\n\n"
-            "1️⃣ <b>Descarga TODO</b>\n"
-            "   Sync masivo de tu historial completo\n\n"
-            "2️⃣ <b>Calcula por año</b>\n"
-            "   Usa /proyeccion para cada ejercicio\n\n"
-            "3️⃣ <b>Presenta declaraciones complementarias</b>\n"
-            "   Portal SAT → Declaraciones → Complementarias\n\n"
-            "4️⃣ <b>Paga actualizaciones y recargos</b>\n"
-            "   - Actualización: inflación\n"
-            "   - Recargos: 1.47% mensual\n\n"
-            "5️⃣ <b>Considera programa de regularización</b>\n"
-            "   El SAT ofrece descuentos ocasionalmente\n\n"
-            "⚠️ <b>CRÍTICO:</b> Si el monto es alto (>$50,000), contrata contador.\n"
-            "El SAT puede embargar cuentas después de 2-3 años."
-        )
-        await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_baja(update: Update, context):
     """Comando /baja - Suspensión temporal o baja definitiva"""
     args = context.args
-    
-    if not args or args[0].lower() not in ['temporal', 'definitiva']:
+
+    if not args or args[0].lower() not in ["temporal", "definitiva"]:
         text = (
             "🔒 <b>BAJA DE ACTIVIDADES</b>\n\n"
             "¿Quieres Suspensión Temporal o Baja Definitiva?\n\n"
@@ -841,10 +979,10 @@ async def cmd_baja(update: Update, context):
         )
         await update.message.reply_text(text, parse_mode="HTML")
         return
-    
+
     tipo = args[0].lower()
-    
-    if tipo == 'temporal':
+
+    if tipo == "temporal":
         text = (
             "🔄 <b>SUSPENSIÓN TEMPORAL DE ACTIVIDADES</b>\n\n"
             "<b>Requisitos:</b>\n"
@@ -865,7 +1003,7 @@ async def cmd_baja(update: Update, context):
             "_Si estás en empresa moral y no facturas en personal, SUSPENSIÓN es tu mejor opción._"
         )
         await update.message.reply_text(text, parse_mode="HTML")
-    
+
     else:  # definitiva
         text = (
             "🔒 <b>BAJA DEFINITIVA DEL RFC</b>\n\n"
@@ -894,10 +1032,10 @@ async def cmd_baja(update: Update, context):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    
+
     # Setup morning jobs
     setup_morning_jobs(app)
-    
+
     # Commands
     handlers = [
         ("start", start),
@@ -918,13 +1056,13 @@ def main():
         ("declarar", cmd_declarar),
         ("baja", cmd_baja),
     ]
-    
+
     for command, handler in handlers:
         app.add_handler(CommandHandler(command, handler))
-    
+
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+
     print("🤖 FiscoMind Bot v3.3 - PANORAMA + DECLARAR + BAJA + ALERTAS")
     app.run_polling()
 
