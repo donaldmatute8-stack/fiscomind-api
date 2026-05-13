@@ -1599,6 +1599,68 @@ def comparar_anios():
     )
 
 
+# Exportación de datos
+@app.route("/export/<format>")
+def export_data(format):
+    from export_tools import ExportManager, export_cfdis_to_csv
+    from pathlib import Path
+
+    user_id = request.args.get("user_id", "marco_test")
+    user_dir = DATA_DIR / "users" / user_id
+
+    # Cargar CFDIs
+    cfdis = []
+    sync_files = sorted(user_dir.glob("sat_sync_*.json"), reverse=True)
+    for sf in sync_files:
+        try:
+            with open(sf) as f:
+                data = json.load(f)
+            cfdis.extend(data.get("cfdis", []))
+        except:
+            continue
+
+    if format == "csv":
+        csv_data = export_cfdis_to_csv(cfdis)
+        return (
+            csv_data,
+            200,
+            {
+                "Content-Type": "text/csv",
+                "Content-Disposition": "attachment; filename=cfdis.csv",
+            },
+        )
+
+    elif format == "pdf":
+        import base64
+
+        pdf_data = generate_pdf_report(user_id, str(user_dir))
+        if isinstance(pdf_data, bytes):
+            return jsonify(
+                {
+                    "status": "success",
+                    "pdf": base64.b64encode(pdf_data).decode(),
+                    "generated_at": datetime.now().isoformat(),
+                }
+            )
+        else:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": pdf_data.decode()
+                    if isinstance(pdf_data, bytes)
+                    else str(pdf_data),
+                }
+            )
+
+    else:
+        return jsonify(
+            {
+                "status": "error",
+                "message": f"Formato '{format}' no soportado. Use 'csv' o 'pdf'",
+            }
+        ), 400
+
+
 # Import Facturama routes
 try:
     from facturama_routes import facturama_bp
