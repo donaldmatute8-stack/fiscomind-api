@@ -93,6 +93,112 @@ async def opinion(update: Update, context):
     else:
         await update.message.reply_text(f"📋 Opinión: {h(str(d.get('status','Error')))}\nPendientes: {d.get('pending_obligations','?')}", parse_mode='HTML')
 
+async def resumen_mes(update: Update, context):
+    mes = context.args[0] if context.args else date.today().strftime('%Y-%m')
+    d = api_get("/resumen-mensual", mes=mes)
+    if d.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(d.get('error')))}", parse_mode='HTML'); return
+    text = (
+        f"📊 <b>Resumen {h(d.get('nombre_mes', mes))}</b>\n\n"
+        f"💰 Ingresos: ${d.get('ingresos',0):,.2f}\n"
+        f"💸 Egresos: ${d.get('egresos',0):,.2f}\n"
+        f"✅ Deducciones: ${d.get('deducciones',0):,.2f}\n"
+        f"📄 CFDIs: {d.get('cfdis_recibidos',0)}\n\n"
+        f"<b>ISR Estimado:</b>\n"
+        f"Base gravable: ${d.get('isr',{}).get('base_gravable',0):,.2f}\n"
+        f"ISR estimado: ${d.get('isr',{}).get('isr_estimado',0):,.2f}\n"
+        f"Reserva mensual: ${d.get('isr',{}).get('reserva_mensual',0):,.2f}\n\n"
+        f"<i>Usa /mes 2026-04 para otro mes</i>"
+    )
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def resumen_trimestre(update: Update, context):
+    q = context.args[0] if context.args else None
+    d = api_get("/resumen-trimestral", trimestre=q) if q else api_get("/resumen-trimestral")
+    if d.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(d.get('error')))}", parse_mode='HTML'); return
+    t = d.get('totales', {})
+    meses = d.get('resumen_meses', [])
+    text = (
+        f"📊 <b>Resumen {h(d.get('trimestre',''))}</b>\n\n"
+        f"💰 Ingresos: ${t.get('ingresos',0):,.2f}\n"
+        f"✅ Deducciones: ${t.get('deducciones',0):,.2f}\n"
+        f"Base gravable: ${t.get('base_gravable',0):,.2f}\n"
+        f"ISR estimado: ${t.get('isr_estimado',0):,.2f}\n"
+        f"Reserva/mes: ${t.get('reserva_mensual',0):,.2f}\n\n"
+        f"<b>Meses:</b>\n"
+    )
+    for m in meses:
+        text += f"• {m.get('mes','')}: ${m.get('ingresos',0):,.0f} | {m.get('cfdis',0)} CFDIs\n"
+    text += "\n<i>Usa /trimestre 2026-Q1 para otro trimestre</i>"
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def calculo_isr(update: Update, context):
+    anio = context.args[0] if context.args else str(date.today().year)
+    d = api_get("/calculo-isr", anio=anio)
+    if d.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(d.get('error')))}", parse_mode='HTML'); return
+    a = d.get('acumulado', {})
+    p = d.get('proyeccion_anual', {})
+    text = (
+        f"🧮 <b>ISR {anio}</b>\n\n"
+        f"<b>Acumulado a {d.get('mes_actual',0)}/{anio}:</b>\n"
+        f"Ingresos: ${a.get('ingresos',0):,.2f}\n"
+        f"Deducciones: ${a.get('deducciones',0):,.2f}\n"
+        f"ISR estimado: ${a.get('isr_estimado',0):,.2f}\n\n"
+        f"<b>Proyección anual:</b>\n"
+        f"Ingresos: ${p.get('ingresos_estimados',0):,.2f}\n"
+        f"ISR anual: ${p.get('isr_estimado',0):,.2f}\n"
+        f"Reserva mensual: ${p.get('reserva_mensual',0):,.2f}\n"
+        f"Reserva acumulada: ${p.get('reserva_acumulada',0):,.2f}\n\n"
+        f"💡 <b>{h(d.get('recomendacion',''))}</b>\n\n"
+        f"<i>Usa /isr 2025 para otro año</i>"
+    )
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def complementos_pendientes(update: Update, context):
+    d = api_get("/complementos-pendientes")
+    if d.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(d.get('error')))}", parse_mode='HTML'); return
+    p = d.get('pendientes', [])
+    if not p:
+        await update.message.reply_text("✅ No hay complementos de pago pendientes.", parse_mode='HTML'); return
+    text = (
+        f"💳 <b>Complementos Pendientes</b>\n"
+        f"Total: {d.get('total_pendientes',0)} | "
+        f"Saldo: ${d.get('total_saldo',0):,.2f}\n"
+        f"Urgentes: {d.get('urgentes',0)}\n\n"
+    )
+    for x in p[:10]:
+        e = "🔴" if x.get('urgencia')=='critical' else ("🟡" if x.get('urgencia')=='high' else "🟢")
+        text += (
+            f"{e} <b>${x.get('saldo_pendiente',0):,.2f}</b>\n"
+            f"   Para: {h(x.get('nombre_receptor','')[:25])}\n"
+            f"   Vence: {x.get('fecha_limite_complemento','')}\n"
+            f"   Días: {x.get('dias_restantes','?')}\n\n"
+        )
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def clasificacion_gastos(update: Update, context):
+    mes = context.args[0] if context.args else date.today().strftime('%Y-%m')
+    d = api_get("/clasificacion-gastos", mes=mes)
+    if d.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(d.get('error')))}", parse_mode='HTML'); return
+    cats = d.get('categorias', {})
+    if not cats:
+        await update.message.reply_text(f"📊 No hay gastos en {mes}", parse_mode='HTML'); return
+    text = (
+        f"📊 <b>Gastos por Categoría - {mes}</b>\n\n"
+        f"Total deducible: ${d.get('total_deducible',0):,.2f}\n"
+        f"Total no deducible: ${d.get('total_no_deducible',0):,.2f}\n\n"
+        f"<b>Top Categorías:</b>\n"
+    )
+    for nom, info in list(cats.items())[:8]:
+        icon = "✅" if info.get('deducible') else "❌"
+        text += f"{icon} {h(nom[:30])}: ${info.get('total',0):,.2f} ({info.get('count',0)})\n"
+    text += "\n<i>Usa /gastos 2026-04 para otro mes</i>"
+    await update.message.reply_text(text, parse_mode='HTML')
+
 async def estrategia(update: Update, context):
     d = api_get("/dashboard"); s = d.get("summary",{})
     o = api_get("/obligaciones").get("obligaciones_pendientes",[])
@@ -146,18 +252,29 @@ async def factura(update: Update, context):
 # Conversational AI
 async def handle_message(update: Update, context):
     text = update.message.text.lower()
-    if any(w in text for w in ['isr','impuesto','renta']):
+    words = text.split()
+    
+    # Detectar comandos por palabras clave
+    if 'mes' in text or ('resumen' in text and 'mes' in text):
+        await resumen_mes(update, context)
+    elif 'trimestre' in text or 'quarter' in text:
+        await resumen_trimestre(update, context)
+    elif text.startswith('/isr') or ('calculo' in text and 'isr' in text) or ('proyeccion' in text and 'isr' in text):
+        await calculo_isr(update, context)
+    elif 'complemento' in text or 'ppd' in text or 'pendiente' in text:
+        await complementos_pendientes(update, context)
+    elif 'categoria' in text or 'clasificacion' in text or 'gastos por' in text:
+        await clasificacion_gastos(update, context)
+    elif any(w in text for w in ['isr','impuesto','renta']):
         d = api_get("/dashboard"); s = d.get("summary",{})
         await update.message.reply_text(
-            f"💰 <b>ISR Estimado</b>\n\nIngresos: ${s.get('total_ingresos',0):,.2f}\nISR ~30%: ${s.get('total_ingresos',0)*0.30:,.2f}\nDeducciones: ${s.get('total_deducible',0):,.2f}\nAhorro: ${s.get('ahorro_isr_estimado',0):,.2f}", parse_mode='HTML')
+            f"💰 <b>ISR Estimado</b>\n\nIngresos: ${s.get('total_ingresos',0):,.2f}\nISR ~30%: ${s.get('total_ingresos',0)*0.30:,.2f}\nDeducciones: ${s.get('total_deducible',0):,.2f}\nAhorro: ${s.get('ahorro_isr_estimado',0):,.2f}\n\nUsa <code>/isr</code> para cálculo detallado", parse_mode='HTML')
     elif 'iva' in text:
         d = api_get("/dashboard"); s = d.get("summary",{})
         await update.message.reply_text(
             f"📊 <b>IVA</b>\n\nA cargo: ${s.get('total_ingresos',0)*0.16:,.2f}\nA acreditar: ${s.get('total_egresos',0)*0.16:,.2f}\nPor pagar: ${(s.get('total_ingresos',0)-s.get('total_egresos',0))*0.16:,.2f}", parse_mode='HTML')
     elif any(w in text for w in ['deduc','gasto']):
-        d = api_get("/dashboard"); s = d.get("summary",{})
-        await update.message.reply_text(
-            f"📝 <b>Deducciones</b>\n\nTotal: ${s.get('total_deducible',0):,.2f}\nAhorro: ${s.get('ahorro_isr_estimado',0):,.2f}\n\n💡 Agrega: médicos, transporte, software, donativos", parse_mode='HTML')
+        await clasificacion_gastos(update, context)
     elif any(w in text for w in ['estrategia','optim','ahorr']):
         await estrategia(update, context)
     elif any(w in text for w in ['oblig','calendario','venc']):
@@ -170,9 +287,38 @@ async def handle_message(update: Update, context):
         await factura(update, context)
     elif any(w in text for w in ['hola','hi','hello','buenas']):
         await start(update, context)
+    elif 'ayuda' in text or 'help' in text or 'comandos' in text:
+        await update.message.reply_text(
+            "📋 <b>Comandos disponibles:</b>\n\n"
+            "/start - Inicio y menú\n"
+            "/dashboard - Estado general\n"
+            "/cfdis - Ver facturas\n"
+            "/mes [YYYY-MM] - Resumen mensual\n"
+            "/trimestre [YYYY-Q#] - Resumen trimestral\n"
+            "/isr [año] - Cálculo ISR\n"
+            "/complementos - PPDs pendientes\n"
+            "/gastos [mes] - Clasificación\n"
+            "/obligaciones - Vencimientos\n"
+            "/estrategia - Recomendaciones\n"
+            "/sync - Sincronizar SAT\n"
+            "/factura - Crear factura\n\n"
+            "💬 También puedes preguntar en lenguaje natural",
+            parse_mode='HTML'
+        )
     else:
         await update.message.reply_text(
-            "Puedo ayudarte con:\n• ISR, IVA, deducciones\n• Estrategia fiscal\n• Obligaciones\n• Sincronizar SAT\n• Crear factura\n\nPregúntame algo 😊", parse_mode='HTML')
+            "Puedo ayudarte con:\n"
+            "• ISR, IVA, deducciones\n"
+            "• Resumen mensual/trimestral\n"
+            "• Complementos de pago\n"
+            "• Clasificación de gastos\n"
+            "• Estrategia fiscal\n"
+            "• Obligaciones\n"
+            "• Sincronizar SAT\n"
+            "• Crear factura\n\n"
+            "Usa <code>/ayuda</code> para ver todos los comandos",
+            parse_mode='HTML'
+        )
 
 async def button(update: Update, context):
     q = update.callback_query; await q.answer()
@@ -213,14 +359,21 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("cfdis", cfdis))
+    app.add_handler(CommandHandler("mes", resumen_mes))
+    app.add_handler(CommandHandler("trimestre", resumen_trimestre))
+    app.add_handler(CommandHandler("isr", calculo_isr))
+    app.add_handler(CommandHandler("complementos", complementos_pendientes))
+    app.add_handler(CommandHandler("gastos", clasificacion_gastos))
     app.add_handler(CommandHandler("obligaciones", obligaciones))
     app.add_handler(CommandHandler("opinion", opinion))
     app.add_handler(CommandHandler("estrategia", estrategia))
     app.add_handler(CommandHandler("sync", sync_sat))
     app.add_handler(CommandHandler("factura", factura))
+    app.add_handler(CommandHandler("ayuda", handle_message))  # Handle /ayuda
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🤖 FiscoMind Bot v3.0 starting...")
+    print("🤖 FiscoMind Bot v3.1 starting...")
+    print("New commands: /mes /trimestre /isr /complementos /gastos /ayuda")
     app.run_polling()
 
 if __name__ == "__main__":

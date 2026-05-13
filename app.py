@@ -222,16 +222,222 @@ def sync_check():
         logger.error(f"Sync check failed: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ─── SISTEMA DE FECHAS Y FILTROS ─────────────────────────────────────
+
+from datetime import datetime as dt
+
+def parse_fecha(fecha_str):
+    """Parse fecha desde string ISO o DD/MM/YYYY"""
+    try:
+        return date.fromisoformat(fecha_str)
+    except:
+        try:
+            return dt.strptime(fecha_str, '%d/%m/%Y').date()
+        except:
+            return None
+
+def get_mes_fiscal(fecha_str):
+    """Extraer mes fiscal de fecha ISO"""
+    try:
+        d = date.fromisoformat(fecha_str)
+        return f"{d.year}-{str(d.month).zfill(2)}"
+    except:
+        return None
+
+def get_trimestre(fecha_str):
+    """Extraer trimestre de fecha ISO"""
+    try:
+        d = date.fromisoformat(fecha_str)
+        q = (d.month - 1) // 3 + 1
+        return f"{d.year}-Q{q}"
+    except:
+        return None
+
+def calcular_isr_estimado(ingresos, deducciones=0, regimen="612", actividad="profesional"):
+    """
+    Calculo estimado de ISR para personas físicas
+    Regimen 612: Actividades Profesionales
+    """
+    base_gravable = max(0, ingresos - deducciones)
+    
+    # Tabla ISR 2026 (aproximada)
+    if base_gravable <= 7464.05:
+        isr = base_gravable * 0.0192
+    elif base_gravable <= 63324.11:
+        isr = base_gravable * 0.064 + 133.28
+    elif base_gravable <= 111396.25:
+        isr = base_gravable * 0.1088 + 3357.30
+    elif base_gravable <= 129921.73:
+        isr = base_gravable * 0.128 + 7976.64
+    elif base_gravable <= 155229.00:
+        isr = base_gravable * 0.1664 + 10364.16
+    elif base_gravable <= 296737.70:
+        isr = base_gravable * 0.1976 + 15356.85
+    elif base_gravable <= 392842.86:
+        isr = base_gravable * 0.2195 + 43631.86
+    elif base_gravable <= 939929.66:
+        isr = base_gravable * 0.2388 + 64769.14
+    else:
+        isr = base_gravable * 0.30 + 176570.65
+    
+    return {
+        "ingresos": round(ingresos, 2),
+        "deducciones": round(deducciones, 2),
+        "base_gravable": round(base_gravable, 2),
+        "isr_estimado": round(isr, 2),
+        "reserva_mensual": round(isr / 12, 2),
+        "tasa_efectiva": round((isr / ingresos) * 100, 2) if ingresos > 0 else 0
+    }
+
+# Categorías de gastos deducibles (SAT)
+CATEGORIAS_DEDUCIBLES = {
+    "G01": {"nombre": "Adquisición de mercancías", "deducible": True, "limite": None},
+    "G02": {"nombre": "Devoluciones, descuentos, bonificaciones", "deducible": True, "limite": None},
+    "G03": {"nombre": "Gastos en general", "deducible": True, "limite": None},
+    "I01": {"nombre": "Construcciones", "deducible": True, "limite": None, "depreciable": True},
+    "I02": {"nombre": "Mobiliario y equipo de oficina", "deducible": True, "limite": None, "depreciable": True},
+    "I03": {"nombre": "Equipo de transporte", "deducible": True, "limite": None, "depreciable": True},
+    "I04": {"nombre": "Equipo de computo", "deducible": True, "limite": None, "depreciable": True},
+    "I05": {"nombre": "Dados, troqueles, moldes, matrices", "deducible": True, "limite": None},
+    "I06": {"nombre": "Comunicaciones telefónicas", "deducible": True, "limite": None},
+    "I07": {"nombre": "Comunicaciones satelitales", "deducible": True, "limite": None},
+    "I08": {"nombre": "Otra maquinaria y equipo", "deducible": True, "limite": None},
+    "D01": {"nombre": "Honorarios médicos", "deducible": True, "limite": "personales"},
+    "D02": {"nombre": "Gastos médicos por incapacidad", "deducible": True, "limite": "personales"},
+    "D03": {"nombre": "Gastos funerales", "deducible": True, "limite": "personales"},
+    "D04": {"nombre": "Donativos", "deducible": True, "limite": "personales"},
+    "D05": {"nombre": "Intereses reales hipotecarios", "deducible": True, "limite": "personales"},
+    "D06": {"nombre": "Aportaciones voluntarias SAR", "deducible": True, "limite": "personales"},
+    "D07": {"nombre": "Primas de seguros de gastos médicos", "deducible": True, "limite": "personales"},
+    "D08": {"nombre": "Gastos de transportación escolar", "deducible": True, "limite": "personales"},
+    "D09": {"nombre": "Depósitos en cuentas de ahorro", "deducible": True, "limite": "personales"},
+    "D10": {"nombre": "Servicios educativos (colegiatura)", "deducible": True, "limite": "personales"},
+    "S01": {"nombre": "Sin efectos fiscales", "deducible": False},
+    "CP01": {"nombre": "Pagos", "deducible": False},
+    "CN01": {"nombre": "Nómina", "deducible": True},
+}
+
+def clasificar_gasto(cfdi):
+    """Clasifica un CFDI y determina si es deducible"""
+    uso_cfdi = cfdi.get('uso_cfdi', 'S01')
+    efecto = cfdi.get('efecto', 'I')
+    
+    categoria = CATEGORIAS_DEDUCIBLES.get(uso_cfdi, {"nombre": "No clasificado", "deducible": False})
+    
+    # Solo ingresos (efecto I) pueden ser deducibles en gastos
+    # Egresos (efecto E) son tuyos emitidos
+    
+    es_deducible = categoria.get('deducible', False)
+    
+    # Si es factura recibida (efecto I) y tiene categoría deducible
+    if efecto == 'I' and es_deducible:
+        return {
+            "clasificacion": categoria['nombre'],
+            "uso_cfdi": uso_cfdi,
+            "deducible": True,
+            "monto_deducible": float(cfdi.get('monto', 0)),
+            "notas": categoria.get('limite', None)
+        }
+    else:
+        return {
+            "clasificacion": categoria['nombre'] if es_deducible else "No deducible",
+            "uso_cfdi": uso_cfdi,
+            "deducible": False,
+            "monto_deducible": 0
+        }
+
 @app.route('/cfdis')
 def list_cfdis():
+    """List CFDIs con filtros de fechas y paginación"""
     cache = load_cache()
     tipo = request.args.get('tipo', 'all')
+    
+    # Filtros de fecha
+    desde = request.args.get('desde')  # YYYY-MM-DD
+    hasta = request.args.get('hasta')  # YYYY-MM-DD
+    mes = request.args.get('mes')  # YYYY-MM
+    trimestre = request.args.get('trimestre')  # YYYY-Q#
+    anio = request.args.get('anio')  # YYYY
+    
+    # Filtros adicionales
+    efecto = request.args.get('efecto')  # I (Ingreso), E (Egreso), P (Pago)
+    estatus = request.args.get('estatus')  # 1 (Vigente), 0 (Cancelada)
+    min_monto = request.args.get('min_monto', type=float)
+    max_monto = request.args.get('max_monto', type=float)
+    
     cfdis = []
     if tipo in ['all', 'recibidos']:
         cfdis.extend(cache.get('recibidos', []))
     if tipo in ['all', 'emitidos']:
         cfdis.extend(cache.get('emitidos', []))
-    return jsonify({"rfc": "MUTM8610091NA", "tipo": tipo, "total": len(cfdis), "cfdis": cfdis})
+    
+    # Aplicar filtros
+    resultado = []
+    for c in cfdis:
+        incluir = True
+        fecha_emision = c.get('fecha_emision', '')
+        
+        # Filtro rango de fechas
+        if desde:
+            try:
+                if date.fromisoformat(fecha_emision) < date.fromisoformat(desde):
+                    incluir = False
+            except: pass
+        
+        if hasta:
+            try:
+                if date.fromisoformat(fecha_emision) > date.fromisoformat(hasta):
+                    incluir = False
+            except: pass
+        
+        # Filtro por mes fiscal
+        if mes and mes != get_mes_fiscal(fecha_emision):
+            incluir = False
+        
+        # Filtro por trimestre
+        if trimestre and trimestre != get_trimestre(fecha_emision):
+            incluir = False
+        
+        # Filtro por año
+        if anio and not fecha_emision.startswith(anio):
+            incluir = False
+        
+        # Filtro por efecto
+        if efecto and c.get('efecto') != efecto:
+            incluir = False
+        
+        # Filtro por estatus
+        if estatus and str(c.get('estatus')) != estatus:
+            incluir = False
+        
+        # Filtro por monto
+        monto = float(c.get('monto', 0))
+        if min_monto is not None and monto < min_monto:
+            incluir = False
+        if max_monto is not None and monto > max_monto:
+            incluir = False
+        
+        if incluir:
+            resultado.append(c)
+    
+    # Calcular totales
+    total_monto = sum(float(c.get('monto', 0)) for c in resultado)
+    
+    return jsonify({
+        "rfc": "MUTM8610091NA",
+        "tipo": tipo,
+        "total": len(resultado),
+        "total_monto": round(total_monto, 2),
+        "filtros_aplicados": {
+            "desde": desde,
+            "hasta": hasta,
+            "mes": mes,
+            "trimestre": trimestre,
+            "anio": anio,
+            "efecto": efecto
+        },
+        "cfdis": resultado
+    })
 
 @app.route('/emitidos')
 def list_emitidos():
@@ -239,6 +445,289 @@ def list_emitidos():
     emitidos = cache.get('emitidos', [])
     total = sum(float(c.get('monto', 0)) for c in emitidos)
     return jsonify({"rfc": "MUTM8610091NA", "total_emitidos": len(emitidos), "total_monto": round(total, 2), "cfdis": emitidos})
+
+@app.route('/resumen-mensual')
+def resumen_mensual():
+    """Resumen fiscal por mes"""
+    mes = request.args.get('mes', date.today().strftime('%Y-%m'))  # YYYY-MM
+    cache = load_cache()
+    
+    try:
+        year, month = mes.split('-')
+        year, month = int(year), int(month)
+    except:
+        return jsonify({"error": "Formato de mes debe ser YYYY-MM"}), 400
+    
+    # Filtrar CFDIs del mes
+    cfdis_recibidos = [c for c in cache.get('recibidos', []) 
+                       if get_mes_fiscal(c.get('fecha_emision', '')) == mes]
+    cfdis_emitidos = [c for c in cache.get('emitidos', []) 
+                      if get_mes_fiscal(c.get('fecha_emision', '')) == mes]
+    
+    # Calcular totales
+    ingresos = sum(float(c.get('monto', 0)) for c in cfdis_recibidos if c.get('efecto') == 'I')
+    egresos = sum(float(c.get('monto', 0)) for c in cfdis_recibidos if c.get('efecto') == 'E')
+    pagos = sum(float(c.get('monto', 0)) for c in cfdis_recibidos if c.get('efecto') == 'P')
+    
+    # Calcular deducciones
+    deducciones = 0
+    deducciones_detalle = []
+    for c in cfdis_recibidos:
+        clasif = clasificar_gasto(c)
+        if clasif['deducible']:
+            monto = clasif['monto_deducible']
+            deducciones += monto
+            deducciones_detalle.append({
+                "uuid": c.get('uuid', ''),
+                "monto": monto,
+                "clasificacion": clasif['clasificacion'],
+                "uso_cfdi": clasif['uso_cfdi']
+            })
+    
+    # Calcular ISR estimado
+    isr = calcular_isr_estimado(ingresos, deducciones)
+    
+    return jsonify({
+        "mes": mes,
+        "nombre_mes": f"{MONTH_NAMES.get(str(month).zfill(2), '')} {year}",
+        "cfdis_recibidos": len(cfdis_recibidos),
+        "cfdis_emitidos": len(cfdis_emitidos),
+        "ingresos": round(ingresos, 2),
+        "egresos": round(egresos, 2),
+        "pagos": round(pagos, 2),
+        "deducciones": round(deducciones, 2),
+        "deducciones_detalle": deducciones_detalle[:10],  # Top 10
+        "isr": isr,
+        "estado_cuenta": {
+            "saldo": round(ingresos - egresos, 2),
+            "base_gravable": isr['base_gravable'],
+            "reserva_isr": isr['reserva_mensual']
+        }
+    })
+
+@app.route('/resumen-trimestral')
+def resumen_trimestral():
+    """Resumen fiscal por trimestre"""
+    trimestre = request.args.get('trimestre')  # YYYY-Q#
+    if not trimestre:
+        # Calcular trimestre actual
+        today = date.today()
+        q = (today.month - 1) // 3 + 1
+        trimestre = f"{today.year}-Q{q}"
+    
+    cache = load_cache()
+    
+    try:
+        year, q = trimestre.split('-Q')
+        year = int(year)
+        q = int(q)
+    except:
+        return jsonify({"error": "Formato de trimestre debe ser YYYY-Q#"}), 400
+    
+    # Calcular meses del trimestre
+    meses = [f"{year}-{str(m).zfill(2)}" for m in range((q-1)*3 + 1, q*3 + 1)]
+    
+    # Agregar resumen de cada mes
+    resumen_meses = []
+    total_ingresos = 0
+    total_deducciones = 0
+    
+    for mes in meses:
+        # Reutilizar lógica de resumen mensual
+        cfdis_mes = [c for c in cache.get('recibidos', []) 
+                     if get_mes_fiscal(c.get('fecha_emision', '')) == mes]
+        
+        ingresos_mes = sum(float(c.get('monto', 0)) for c in cfdis_mes if c.get('efecto') == 'I')
+        deducciones_mes = sum(float(c.get('monto', 0)) for c in cfdis_mes 
+                              if clasificar_gasto(c)['deducible'])
+        
+        total_ingresos += ingresos_mes
+        total_deducciones += deducciones_mes
+        
+        resumen_meses.append({
+            "mes": mes,
+            "ingresos": round(ingresos_mes, 2),
+            "deducciones": round(deducciones_mes, 2),
+            "cfdis": len(cfdis_mes)
+        })
+    
+    # ISR trimestral (acumulado)
+    isr_trimestral = calcular_isr_estimado(total_ingresos, total_deducciones)
+    
+    return jsonify({
+        "trimestre": trimestre,
+        "nombre": f"{trimestre} (Abr-Jun)" if q == 2 else trimestre,
+        "meses": meses,
+        "resumen_meses": resumen_meses,
+        "totales": {
+            "ingresos": round(total_ingresos, 2),
+            "deducciones": round(total_deducciones, 2),
+            "base_gravable": isr_trimestral['base_gravable'],
+            "isr_estimado": isr_trimestral['isr_estimado'],
+            "reserva_mensual": isr_trimestral['reserva_mensual']
+        },
+        "tendencia": "↑" if total_ingresos > 0 else "→"
+    })
+
+@app.route('/calculo-isr')
+def calculo_isr():
+    """Cálculo de ISR estimado con proyección"""
+    cache = load_cache()
+    
+    # Obtener año
+    anio = request.args.get('anio', str(date.today().year))
+    
+    # Calcular ingresos acumulados del año
+    cfdis_anio = [c for c in cache.get('recibidos', [])
+                  if c.get('fecha_emision', '').startswith(anio) and c.get('efecto') == 'I']
+    
+    ingresos_acumulados = sum(float(c.get('monto', 0)) for c in cfdis_anio)
+    deducciones_acumuladas = sum(float(c.get('monto', 0)) for c in cfdis_anio 
+                                  if clasificar_gasto(c)['deducible'])
+    
+    # Proyección anual (si vamos a mitad de año, proyectar)
+    mes_actual = date.today().month if anio == str(date.today().year) else 12
+    if mes_actual > 0:
+        factor_proyeccion = 12 / mes_actual
+        ingresos_proyectados = ingresos_acumulados * factor_proyeccion
+        deducciones_proyectadas = deducciones_acumuladas * factor_proyeccion
+    else:
+        ingresos_proyectados = ingresos_acumulados
+        deducciones_proyectadas = deducciones_acumuladas
+    
+    isr_actual = calcular_isr_estimado(ingresos_acumulados, deducciones_acumuladas)
+    isr_proyectado = calcular_isr_estimado(ingresos_proyectados, deducciones_proyectadas)
+    
+    return jsonify({
+        "anio": anio,
+        "mes_actual": mes_actual,
+        "acumulado": {
+            "ingresos": round(ingresos_acumulados, 2),
+            "deducciones": round(deducciones_acumuladas, 2),
+            "isr_estimado": isr_actual['isr_estimado'],
+            "reserva_mensual": isr_actual['reserva_mensual']
+        },
+        "proyeccion_anual": {
+            "ingresos_estimados": round(ingresos_proyectados, 2),
+            "deducciones_estimadas": round(deducciones_proyectadas, 2),
+            "isr_estimado": isr_proyectado['isr_estimado'],
+            "reserva_mensual": isr_proyectado['reserva_mensual'],
+            "reserva_acumulada": round(isr_proyectado['reserva_mensual'] * mes_actual, 2)
+        },
+        "recomendacion": f"Reserva ${isr_proyectado['reserva_mensual']:,.2f} mensual para ISR"
+    })
+
+@app.route('/complementos-pendientes')
+def complementos_pendientes():
+    """Lista facturas PPD con saldo pendiente y vencimientos"""
+    cache = load_cache()
+    hoy = date.today()
+    
+    # Facturas PPD emitidas
+    ppd_emitidas = [c for c in cache.get('emitidos', []) 
+                    if c.get('metodo_pago') == 'PPD' and c.get('estatus') == '1']
+    
+    pendientes = []
+    for f in ppd_emitidas:
+        total = float(f.get('monto', 0))
+        pagado = float(f.get('total_pagado', 0))
+        saldo = total - pagado
+        
+        if saldo > 0:
+            # Calcular fecha límite para complemento (10 del mes siguiente)
+            fecha_emision = f.get('fecha_emision', hoy.isoformat())
+            try:
+                fecha_pago = date.fromisoformat(fecha_emision)
+                # Asumir que el pago se hizo el mismo mes, complemento vence 10 del siguiente
+                if fecha_pago.month == 12:
+                    fecha_limite = date(fecha_pago.year + 1, 1, 10)
+                else:
+                    fecha_limite = date(fecha_pago.year, fecha_pago.month + 1, 10)
+                
+                dias_restantes = (fecha_limite - hoy).days
+                
+                pendientes.append({
+                    "uuid": f.get('uuid', ''),
+                    "nombre_receptor": f.get('nombre_receptor', ''),
+                    "rfc_receptor": f.get('rfc_receptor', ''),
+                    "fecha_emision": fecha_emision,
+                    "monto_total": total,
+                    "pagado": pagado,
+                    "saldo_pendiente": round(saldo, 2),
+                    "fecha_limite_complemento": fecha_limite.isoformat(),
+                    "dias_restantes": dias_restantes,
+                    "urgencia": "critical" if dias_restantes < 0 else ("high" if dias_restantes <= 3 else "normal")
+                })
+            except:
+                pass
+    
+    # Ordenar por urgencia
+    pendientes.sort(key=lambda x: x['dias_restantes'])
+    
+    return jsonify({
+        "fecha_actual": hoy.isoformat(),
+        "total_pendientes": len(pendientes),
+        "total_saldo": round(sum(p['saldo_pendiente'] for p in pendientes), 2),
+        "urgentes": len([p for p in pendientes if p['urgencia'] == 'critical']),
+        "pendientes": pendientes
+    })
+
+@app.route('/clasificacion-gastos')
+def clasificacion_gastos():
+    """Análisis de gastos por categoría"""
+    cache = load_cache()
+    
+    # Filtros de fecha
+    mes = request.args.get('mes')  # YYYY-MM
+    anio = request.args.get('anio', str(date.today().year))
+    
+    cfdis = cache.get('recibidos', [])
+    
+    # Filtrar por período
+    if mes:
+        cfdis = [c for c in cfdis if get_mes_fiscal(c.get('fecha_emision', '')) == mes]
+    elif anio:
+        cfdis = [c for c in cfdis if c.get('fecha_emision', '').startswith(anio)]
+    
+    # Clasificar todos los gastos
+    categorias = {}
+    for c in cfdis:
+        clasif = clasificar_gasto(c)
+        categoria = clasif['clasificacion']
+        
+        if categoria not in categorias:
+            categorias[categoria] = {
+                "total": 0,
+                "count": 0,
+                "deducible": clasif['deducible'],
+                "cfdis": []
+            }
+        
+        monto = float(c.get('monto', 0))
+        categorias[categoria]['total'] += monto
+        categorias[categoria]['count'] += 1
+        categorias[categoria]['cfdis'].append({
+            "uuid": c.get('uuid', '')[:8] + "...",
+            "monto": monto,
+            "fecha": c.get('fecha_emision', '')
+        })
+    
+    # Ordenar por monto
+    categorias_ordenadas = dict(sorted(categorias.items(), 
+                                       key=lambda x: x[1]['total'], 
+                                       reverse=True))
+    
+    # Totales
+    total_deducible = sum(cat['total'] for cat in categorias.values() if cat['deducible'])
+    total_no_deducible = sum(cat['total'] for cat in categorias.values() if not cat['deducible'])
+    
+    return jsonify({
+        "periodo": mes or anio,
+        "total_categorias": len(categorias),
+        "total_deducible": round(total_deducible, 2),
+        "total_no_deducible": round(total_no_deducible, 2),
+        "categorias": categorias_ordenadas
+    })
 
 @app.route('/emitir', methods=['POST'])
 def emitir():
