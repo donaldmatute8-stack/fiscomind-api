@@ -1875,6 +1875,48 @@ except ImportError as e:
     logger.warning(f"⚠️ Facturama routes not loaded: {e}")
 
 
+# ─── Regularización Fiscal ─────────────────────────────────────────
+
+
+@app.route("/regularizacion", methods=["GET"])
+def regularizacion_plan():
+    """
+    Genera plan de regularización fiscal completo.
+    Analiza CFDIs, detecta períodos con/sin actividad, recomienda acciones.
+    """
+    from regularizacion_engine import (
+        generar_plan_regularizacion,
+        generar_pdf_regularizacion,
+    )
+
+    rfc = request.args.get("rfc", "MUTM8610091NA")
+    formato = request.args.get("formato", "json")
+
+    try:
+        if formato == "pdf":
+            pdf_bytes = generar_pdf_regularizacion(rfc=rfc, data_dir=str(DATA_DIR))
+            if pdf_bytes and isinstance(pdf_bytes, bytes) and len(pdf_bytes) > 100:
+                return (
+                    pdf_bytes,
+                    200,
+                    {
+                        "Content-Type": "application/pdf",
+                        "Content-Disposition": f"attachment; filename=plan_regularizacion_{rfc}.pdf",
+                    },
+                )
+            else:
+                return jsonify(
+                    {"status": "error", "message": "PDF generation failed"}
+                ), 500
+
+        plan = generar_plan_regularizacion(rfc=rfc, data_dir=str(DATA_DIR))
+        return jsonify({"status": "success", "plan": plan})
+
+    except Exception as e:
+        logger.error(f"Regularizacion error: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
