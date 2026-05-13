@@ -148,6 +148,9 @@ class TimbradoSAT:
     def cancelar(self, uuid: str, motivo: str = "02") -> Dict:
         """Cancela un CFDI usando el servicio gratuito del SAT."""
         try:
+            from satcfdi.create.cancela.cancelacion import Cancelacion
+            from satcfdi.pacs import CancelReason
+
             sat = self._get_sat()
             if not sat:
                 return {
@@ -155,7 +158,17 @@ class TimbradoSAT:
                     "message": "No se pudo conectar al SAT. Verifica FIEL.",
                 }
 
-            resultado = sat.cancel_comprobante(uuid=uuid, rfc=self.rfc)
+            reason_map = {
+                "01": CancelReason.by_selection,
+                "02": CancelReason.substitution,
+                "03": CancelReason.transferred,
+                "04": CancelReason.not_applicable,
+            }
+            reason = reason_map.get(motivo, CancelReason.substitution)
+
+            cancelacion = Cancelacion(rfc=self.rfc, folios=[uuid], reason=reason)
+
+            resultado = sat.cancel_comprobante(cancelacion)
 
             return {
                 "status": "success",
@@ -170,18 +183,25 @@ class TimbradoSAT:
     def validar_estado_cfdi(self, uuid: str) -> Dict:
         """Consulta el estado de un CFDI en el SAT"""
         try:
+            from satcfdi.cfdi import CFDI
+
             sat = self._get_sat()
             if not sat:
                 return {"status": "error", "message": "SAT no disponible"}
 
-            estado = sat.status(uuid=uuid)
+            # Create minimal CFDI object for status check
+            cfdi = CFDI(uuid=uuid)
+            estado = sat.status(cfdi=cfdi)
 
             return {
                 "status": "success",
                 "uuid": uuid,
-                "estado": str(estado),
-                "valido": str(estado) in ["Vigente", "1", "A", "Active"],
+                "estado": estado.get("estado", "desconocido"),
+                "valido": estado.get("estado") == "Vigente",
             }
+
+        except Exception as e:
+            return {"status": "error", "message": f"Error: {str(e)}"}
 
         except Exception as e:
             return {"status": "error", "message": f"Error: {str(e)}"}
