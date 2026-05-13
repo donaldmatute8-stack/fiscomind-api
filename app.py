@@ -104,8 +104,12 @@ def index():
                 "GET /emitidos": "Facturas emitidas",
                 "POST /emitir": "Emitir factura CFDI 4.0",
                 "POST /cancelar": "Cancelar factura",
+                "POST /sync": "Submit CFDI download request (async)",
+                "POST /sync/check": "Check pending requests & download",
                 "GET /obligaciones": "Obligaciones fiscales",
                 "GET /opinion": "Opinión de cumplimiento SAT",
+                "GET /optimize/suggestions": "Sugerencias de optimización fiscal",
+                "GET /optimize/projection": "Proyección ISR + detección salto de tarifa",
             },
         }
     )
@@ -795,6 +799,62 @@ def calculo_isr():
             "recomendacion": f"Reserva ${isr_proyectado['reserva_mensual']:,.2f} mensual para ISR",
         }
     )
+
+
+# ─── Optimización Fiscal (Diferenciadores vs Konta) ───────────────────
+
+
+@app.route("/optimize/suggestions")
+def optimize_suggestions():
+    """Sugerencias de optimización fiscal basadas en CFDIs reales"""
+    from optimization_engine import OptimizationEngine
+    from pathlib import Path
+
+    user_id = request.args.get("user_id", "marco_test")
+    data_dir = Path(f"/app/data/users/{user_id}")
+
+    try:
+        engine = OptimizationEngine(str(data_dir))
+        result = engine.generate_report()
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error en optimización: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/optimize/projection")
+def optimize_projection():
+    """Proyección ISR y detección de salto de tarifa"""
+    from optimization_engine import OptimizationEngine
+    from pathlib import Path
+
+    user_id = request.args.get("user_id", "marco_test")
+    data_dir = Path(f"/app/data/users/{user_id}")
+
+    try:
+        engine = OptimizationEngine(str(data_dir))
+        result = engine.project_isr()
+
+        # Agregar alerta si hay salto de tarifa
+        proy = result.get("proyeccion_anual", {})
+        diferencia = proy.get("diferencia", 0)
+
+        alertas = []
+        if diferencia > 0:
+            alertas.append(
+                {
+                    "tipo": "salto_tarifa",
+                    "titulo": "⚠️ Posible salto de tarifa",
+                    "mensaje": f"Tu ISR real podría ser ${diferencia:,.2f} mayor que tu estimación actual. Considera aumentar deducciones antes de que cierre el año.",
+                    "accion": "Revisa /optimize/suggestions para ver cómo reducir tu base gravable.",
+                }
+            )
+
+        result["alertas"] = alertas
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error en proyección: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/complementos-pendientes")
