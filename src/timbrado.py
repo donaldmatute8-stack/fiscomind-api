@@ -92,7 +92,7 @@ class TimbradoSAT:
 
     def _crear_comprobante(self, datos: Dict):
         """Crea objeto Comprobante para timbrado"""
-        from satcfdi.create import Comprobante, Concepto, Emisor, Receptor
+        from satcfdi.create.cfd.cfdi40 import Comprobante, Concepto, Emisor, Receptor
 
         emisor_data = datos.get("emisor", {})
         receptor_data = datos.get("receptor", {})
@@ -129,18 +129,18 @@ class TimbradoSAT:
         total = datos.get("total", subtotal)
 
         comp = Comprobante(
-            serie=datos.get("serie", "A"),
-            folio=datos.get("folio", ""),
-            fecha=datos.get("fecha", datetime.now().isoformat()),
             emisor=emisor,
             receptor=receptor,
             conceptos=conceptos,
+            lugar_expedicion=datos.get("lugar_expedicion", "63000"),
+            serie=datos.get("serie", "A"),
+            folio=datos.get("folio", ""),
             forma_pago=datos.get("forma_pago", "03"),
             metodo_pago=datos.get("metodo_pago", "PUE"),
             moneda=datos.get("moneda", "MXN"),
-            tipo_comprobante=datos.get("tipo", "I"),
-            subtotal=subtotal,
-            total=total,
+            tipo_de_comprobante="I",
+            exportacion="01",
+            fecha=datetime.now(),
         )
 
         return comp
