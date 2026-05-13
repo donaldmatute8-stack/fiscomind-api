@@ -1030,6 +1030,69 @@ async def cmd_baja(update: Update, context):
         await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def cmd_regularizar(update: Update, context):
+    """
+    /regularizar - Genera plan de regularización como PDF descargable.
+    Analiza tu historial SAT y dice exactamente qué declarar y cómo.
+    """
+    await update.message.reply_text(
+        "🔍 Analizando tu historial fiscal para regularización...", parse_mode="HTML"
+    )
+
+    try:
+        # Obtener plan
+        r = client.get("/regularizacion?formato=json")
+        data = r.json() if hasattr(r, "json") else {"status": "error"}
+
+        if data.get("status") == "success":
+            plan = data.get("plan", {})
+            riesgo = plan.get("riesgo", "DESCONOCIDO")
+            rec = plan.get("recomendacion_principal", "")
+            totales = plan.get("totales", {})
+            estrategia = plan.get("estrategia", {})
+
+            color = {"BAJO": "🟢", "MEDIO": "🟡", "ALTO": "🔴"}.get(riesgo, "⚪")
+
+            text = (
+                f"🎯 <b>PLAN DE REGULARIZACIÓN</b>\n\n"
+                f"Riesgo SAT: {color} <b>{riesgo}</b>\n"
+                f"Recomendación: {rec}\n\n"
+                f"📊 <b>Resumen:</b>\n"
+                f"• Períodos esperados: {totales.get('periodos_esperados', 0)}\n"
+                f"• Con ingresos: {totales.get('periodos_con_ingresos', 0)}\n"
+                f"• Sin ingresos: {totales.get('periodos_sin_ingresos', 0)}\n"
+                f"• ISR estimado total: ${totales.get('isr_estimado_total', 0):,.2f}\n\n"
+                f"✅ <b>Estrategia:</b>\n"
+                f"• Declarar en ceros: {estrategia.get('periodos_a_declarar_ceros', 0)} meses\n"
+                f"• Declarar normal: {estrategia.get('periodos_a_declarar_normal', 0)} meses\n"
+                f"• Prescritos (no necesarios): {estrategia.get('periodos_prescritos_no_necesarios', 0)}\n\n"
+                f"📎 Descargando PDF con el plan completo..."
+            )
+            await update.message.reply_text(text, parse_mode="HTML")
+
+            # Descargar PDF
+            r_pdf = client.get("/regularizacion?formato=pdf")
+            if r_pdf.status_code == 200:
+                buffer = io.BytesIO(r_pdf.content)
+                buffer.name = (
+                    f"plan_regularizacion_{date.today().strftime('%Y%m%d')}.pdf"
+                )
+                await update.message.reply_document(
+                    document=InputFile(buffer, filename=buffer.name),
+                    caption="📋 Tu plan de regularización completo",
+                )
+            else:
+                await update.message.reply_text(
+                    "⚠️ No se pudo generar el PDF, pero el plan JSON está listo.",
+                    parse_mode="HTML",
+                )
+        else:
+            error = data.get("message", "Error desconocido")
+            await update.message.reply_text(f"❌ Error: {error}", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}", parse_mode="HTML")
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -1055,6 +1118,7 @@ def main():
         ("panorama", cmd_panorama),
         ("declarar", cmd_declarar),
         ("baja", cmd_baja),
+        ("regularizar", cmd_regularizar),
     ]
 
     for command, handler in handlers:
