@@ -929,6 +929,200 @@ def update_factura_estatus(uuid):
 
 
 
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=True)
+
+@app.route('/simular', methods=['POST'])
+def simular_escenario():
+    """
+    Simulador de escenarios fiscales "what-if"
+    
+    Escenarios soportados:
+    - compra_activo: Compra de equipo (laptop, muebles) con depreciación
+    - incremento_ingresos: Proyectar más facturación
+    - incremento_deducciones: Gastos adicionales deducibles
+    - honorarios: Calcular retenciones
+    
+    Request body:
+    {
+        "tipo": "compra_activo",
+        "monto": 25000,
+        "descripcion": "Laptop Dell XPS",
+        "mes": "2026-05" (opcional, default: mes actual)
+    }
+    """
+    cache = load_cache()
+    data = request.json or {}
+    
+    tipo = data.get('tipo', 'compra_activo')
+    monto = float(data.get('monto', 0))
+    descripcion = data.get('descripcion', '')
+    mes_simulacion = data.get('mes', date.today().strftime('%Y-%m'))
+    
+    # Calcular situación actual (mes seleccionado)
+    cfdis_mes = [c for c in cache.get('recibidos', [])
+                 if get_mes_fiscal(c.get('fecha_emision', '')) == mes_simulacion
+                 and c.get('efecto') == 'I']
+    
+    ingresos_actuales = sum(float(c.get('monto', 0)) for c in cfdis_mes)
+    deducciones_actuales = sum(float(c.get('monto', 0)) for c in cfdis_mes 
+                                if clasificar_gasto(c)['deducible'])
+    
+    isr_actual = calcular_isr_estimado(ingresos_actuales, deducciones_actuales)
+    
+    # Calcular escenario simulado
+    if tipo == 'compra_activo':
+        # Depreciación inmediata para equipos de cómputo <= $25,000
+        if monto <= 25000 and 'computo' in descripcion.lower():
+            deduccion_inmediata = monto  # Deducción inmediata
+            depreciacion_anual = 0
+            nota = "✅ Deducción inmediata (Art. 31 frac. XII LISR)"
+        else:
+            # Depreciación normal
+            deduccion_inmediata = 0
+            depreciacion_anual = monto * 0.30  # 30% anual típico
+            nota = f"📊 Depreciación 30% anual: ${depreciacion_anual:,.2f}/año"
+        
+        nuevas_deducciones = deducciones_actuales + deduccion_inmediata
+        
+    elif tipo == 'incremento_ingresos':
+        nuevas_deducciones = deducciones_actuales
+        ingresos_actuales += monto
+        nota = f"📈 Ingresos adicionales: ${monto:,.2f}"
+        
+    elif tipo == 'incremento_deducciones':
+        nuevas_deducciones = deducciones_actuales + monto
+        nota = f"✅ Gastos deducibles adicionales: ${monto:,.2f}"
+        
+    elif tipo == 'honorarios':
+        # Retenciones ISR e IVA para honorarios
+        retencion_isr = monto * 0.10  # 10% ISR
+        retencion_iva = monto * 0.1067  # 10.67% IVA (2/3 de 16%)
+        nota = f"💰 Retenciones: ISR ${retencion_isr:,.2f}, IVA ${retencion_iva:,.2f}"
+        nuevas_deducciones = deducciones_actuales
+        
+    else:
+        return jsonify({"error": f"Tipo de escenario no soportado: {tipo}"}), 400
+    
+    # Calcular ISR nuevo
+    isr_nuevo = calcular_isr_estimado(ingresos_actuales, nuevas_deducciones)
+    
+    # Diferencias
+    ahorro_isr = isr_actual['isr_estimado'] - isr_nuevo['isr_estimado']
+    
+    return jsonify({
+        "status": "success",
+        "escenario": {
+            "tipo": tipo,
+            "descripcion": descripcion,
+            "monto": monto,
+            "mes": mes_simulacion
+        },
+        "situacion_actual": {
+            "ingresos": round(ingresos_actuales, 2),
+            "deducciones": round(deducciones_actuales, 2),
+            "base_gravable": isr_actual['base_gravable'],
+            "isr_estimado": isr_actual['isr_estimado'],
+            "reserva_mensual": isr_actual['reserva_mensual']
+        },
+        "situacion_simulada": {
+            "ingresos": round(ingresos_actuales, 2),
+            "deducciones": round(nuevas_deducciones, 2),
+            "base_gravable": isr_nuevo['base_gravable'],
+            "isr_estimado": isr_nuevo['isr_estimado'],
+            "reserva_mensual": isr_nuevo['reserva_mensual']
+        },
+        "resultado": {
+            "ahorro_isr": round(ahorro_isr, 2),
+            "porcentaje_ahorro": round((ahorro_isr / isr_actual['isr_estimado']) * 100, 1) if isr_actual['isr_estimado'] > 0 else 0,
+            "nota": nota
+        },
+        "recomendacion": f"💡 {nota}\n\nAhorro estimado: ${ahorro_isr:,.2f} en ISR"
+    })
+
+@app.route('/comparar', methods=['GET'])
+def comparar_anios():
+    """
+    Comparativa año vs año
+    
+    Query params:
+    - anio: Año a comparar (default: año anterior)
+    """
+    cache = load_cache()
+    anio_comparar = request.args.get('anio', str(date.today().year - 1))
+    anio_actual = str(date.today().year)
+    
+    mes_actual = date.today().month
+    
+    def get_resumen_anio(anio, mes_limite=None):
+        """Obtener resumen hasta cierto mes"""
+        cfdis = [c for c in cache.get('recibidos', [])
+                 if c.get('fecha_emision', '').startswith(anio)
+                 and c.get('efecto') == 'I']
+        
+        if mes_limite:
+            cfdis = [c for c in cfdis 
+                     if int(c.get('fecha_emision', '2000-01-01').split('-')[1]) <= mes_limite]
+        
+        ingresos = sum(float(c.get('monto', 0)) for c in cfdis)
+        deducciones = sum(float(c.get('monto', 0)) for c in cfdis 
+                          if clasificar_gasto(c)['deducible'])
+        
+        isr = calcular_isr_estimado(ingresos, deducciones)
+        
+        return {
+            "anio": anio,
+            "meses": mes_limite or 12,
+            "ingresos": round(ingresos, 2),
+            "deducciones": round(deducciones, 2),
+            "porcentaje_deducciones": round((deducciones / ingresos) * 100, 1) if ingresos > 0 else 0,
+            "isr_estimado": isr['isr_estimado'],
+            "cfdis_count": len(cfdis)
+        }
+    
+    # Resumen año actual hasta mes actual
+    resumen_actual = get_resumen_anio(anio_actual, mes_actual)
+    
+    # Resumen año comparar hasta mismo mes
+    resumen_comparar = get_resumen_anio(anio_comparar, mes_actual)
+    
+    # Calcular diferencias
+    def calc_diff(actual, anterior, campo):
+        if anterior == 0:
+            return 0
+        return round(((actual - anterior) / anterior) * 100, 1)
+    
+    diferencias = {
+        "ingresos": calc_diff(resumen_actual['ingresos'], resumen_comparar['ingresos'], 'ingresos'),
+        "deducciones": calc_diff(resumen_actual['deducciones'], resumen_comparar['deducciones'], 'deducciones'),
+        "isr": calc_diff(resumen_actual['isr_estimado'], resumen_comparar['isr_estimado'], 'isr'),
+        "porcentaje_deducciones": round(resumen_actual['porcentaje_deducciones'] - resumen_comparar['porcentaje_deducciones'], 1)
+    }
+    
+    # Alertas
+    alertas = []
+    if diferencias['porcentaje_deducciones'] < -2:
+        alertas.append("⚠️ Tu % de deducciones bajó. Podrías pagar más ISR del necesario.")
+    if diferencias['ingresos'] > 20:
+        alertas.append("📈 Tus ingresos subieron significativamente. Considera estrategias de optimización.")
+    if resumen_actual['porcentaje_deducciones'] < 10:
+        alertas.append("💡 Tus deducciones son bajas (<10%). Hay oportunidad de ahorrar ISR.")
+    
+    return jsonify({
+        "comparacion": {
+            "anio_actual": anio_actual,
+            "anio_comparar": anio_comparar,
+            "meses_comparados": mes_actual
+        },
+        "resumen_actual": resumen_actual,
+        "resumen_comparar": resumen_comparar,
+        "diferencias": diferencias,
+        "alertas": alertas,
+        "tendencia": "📈" if diferencias['ingresos'] > 0 else "📉"
+    })
+
+
 # Import Facturama routes
 try:
     from facturama_routes import facturama_bp

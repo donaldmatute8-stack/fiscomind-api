@@ -265,6 +265,10 @@ async def handle_message(update: Update, context):
         await complementos_pendientes(update, context)
     elif 'categoria' in text or 'clasificacion' in text or 'gastos por' in text:
         await clasificacion_gastos(update, context)
+    elif text.startswith('/simular') or 'simular' in text or 'que pasaria si' in text or 'ahorro si' in text:
+        await simular(update, context)
+    elif text.startswith('/comparar') or ('comparar' in text and 'ano' in text) or ('comparar' in text and 'año' in text) or 'ano pasado' in text:
+        await comparar(update, context)
     elif any(w in text for w in ['isr','impuesto','renta']):
         d = api_get("/dashboard"); s = d.get("summary",{})
         await update.message.reply_text(
@@ -320,6 +324,118 @@ async def handle_message(update: Update, context):
             parse_mode='HTML'
         )
 
+async def simular(update: Update, context):
+    """Simulador de escenarios what-if"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "💡 <b>Simulador de Escenarios</b>\n\n"
+            "Ejemplos:\n"
+            "<code>/simular laptop 25000</code>\n"
+            "<code>/simular facturar 50000</code>\n"
+            "<code>/simular deducir 10000</code>\n\n"
+            "Calcula el impacto fiscal antes de decidir.",
+            parse_mode='HTML'
+        )
+        return
+    
+    tipo = context.args[0].lower()
+    try:
+        monto = float(context.args[1])
+    except:
+        await update.message.reply_text("❌ Monto inválido. Ejemplo: /simular laptop 25000", parse_mode='HTML')
+        return
+    
+    # Mapa de tipos
+    tipo_map = {
+        'laptop': ('compra_activo', 'Laptop'),
+        'computadora': ('compra_activo', 'Computadora'),
+        'equipo': ('compra_activo', 'Equipo de oficina'),
+        'facturar': ('incremento_ingresos', 'Ingresos adicionales'),
+        'ingreso': ('incremento_ingresos', 'Ingresos adicionales'),
+        'deducir': ('incremento_deducciones', 'Gastos deducibles'),
+        'gasto': ('incremento_deducciones', 'Gastos deducibles'),
+        'honorarios': ('honorarios', 'Pago de honorarios')
+    }
+    
+    tipo_api, descripcion = tipo_map.get(tipo, ('compra_activo', tipo))
+    
+    # Llamar API
+    r = api_post("/simular", {
+        "tipo": tipo_api,
+        "monto": monto,
+        "descripcion": descripcion
+    })
+    
+    if r.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(r.get('error')))}", parse_mode='HTML')
+        return
+    
+    actual = r.get('situacion_actual', {})
+    simulado = r.get('situacion_simulada', {})
+    resultado = r.get('resultado', {})
+    
+    text = (
+        f"💡 <b>Simulación: {h(descripcion)} ${monto:,.2f}</b>\n\n"
+        f"<b>Situación Actual:</b>\n"
+        f"• Ingresos: ${actual.get('ingresos',0):,.2f}\n"
+        f"• Deducciones: ${actual.get('deducciones',0):,.2f}\n"
+        f"• ISR estimado: ${actual.get('isr_estimado',0):,.2f}\n\n"
+        f"<b>Después del cambio:</b>\n"
+        f"• Ingresos: ${simulado.get('ingresos',0):,.2f}\n"
+        f"• Deducciones: ${simulado.get('deducciones',0):,.2f}\n"
+        f"• ISR estimado: ${simulado.get('isr_estimado',0):,.2f}\n\n"
+    )
+    
+    ahorro = resultado.get('ahorro_isr', 0)
+    if ahorro > 0:
+        text += f"✅ <b>Ahorro: ${ahorro:,.2f} ({resultado.get('porcentaje_ahorro',0)}%)</b>\n\n"
+    elif ahorro < 0:
+        text += f"⚠️ <b>ISR adicional: ${abs(ahorro):,.2f}</b>\n\n"
+    
+    text += f"💡 {h(resultado.get('nota', ''))}"
+    
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def comparar(update: Update, context):
+    """Comparativa año vs año"""
+    anio = context.args[0] if context.args else str(date.today().year - 1)
+    
+    r = api_get("/comparar", anio=anio)
+    if r.get("error"):
+        await update.message.reply_text(f"❌ Error: {h(str(r.get('error')))}", parse_mode='HTML')
+        return
+    
+    actual = r.get('resumen_actual', {})
+    comparar = r.get('resumen_comparar', {})
+    diff = r.get('diferencias', {})
+    
+    def trend(v):
+        if v > 0:
+            return f"+{v}% 📈"
+        elif v < 0:
+            return f"{v}% 📉"
+        return "0% ➡️"
+    
+    text = (
+        f"📊 <b>Comparativa: {actual.get('anio','')} vs {comparar.get('anio','')}</b>\n"
+        f"<i>(Hasta {actual.get('meses',0)} de {actual.get('anio','')})</i>\n\n"
+        f"<b>Ingresos:</b>\n"
+        f"• {actual.get('anio','')}: ${actual.get('ingresos',0):,.2f} {trend(diff.get('ingresos',0))}\n"
+        f"• {comparar.get('anio','')}: ${comparar.get('ingresos',0):,.2f}\n\n"
+        f"<b>Deducciones:</b>\n"
+        f"• {actual.get('anio','')}: ${actual.get('deducciones',0):,.2f} ({actual.get('porcentaje_deducciones',0)}%) {trend(diff.get('deducciones',0))}\n"
+        f"• {comparar.get('anio','')}: ${comparar.get('deducciones',0):,.2f} ({comparar.get('porcentaje_deducciones',0)}%)\n\n"
+        f"<b>ISR Estimado:</b>\n"
+        f"• {actual.get('anio','')}: ${actual.get('isr_estimado',0):,.2f}\n"
+        f"• {comparar.get('anio','')}: ${comparar.get('isr_estimado',0):,.2f} {trend(diff.get('isr',0))}\n\n"
+    )
+    
+    # Alertas
+    for alerta in r.get('alertas', []):
+        text += f"{alerta}\n"
+    
+    await update.message.reply_text(text, parse_mode='HTML')
+
 async def button(update: Update, context):
     q = update.callback_query; await q.answer()
     d = q.data
@@ -369,11 +485,13 @@ def main():
     app.add_handler(CommandHandler("estrategia", estrategia))
     app.add_handler(CommandHandler("sync", sync_sat))
     app.add_handler(CommandHandler("factura", factura))
+    app.add_handler(CommandHandler("simular", simular))
+    app.add_handler(CommandHandler("comparar", comparar))
     app.add_handler(CommandHandler("ayuda", handle_message))  # Handle /ayuda
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🤖 FiscoMind Bot v3.1 starting...")
-    print("New commands: /mes /trimestre /isr /complementos /gastos /ayuda")
+    print("🤖 FiscoMind Bot v3.2 starting...")
+    print("Commands: /start /dashboard /cfdis /mes /trimestre /isr /complementos /gastos /simular /comparar /ayuda")
     app.run_polling()
 
 if __name__ == "__main__":
