@@ -2291,6 +2291,183 @@ def marco_facilidades():
     )
 
 
+@app.route("/declarar/proceso", methods=["GET"])
+def declarar_proceso():
+    """
+    Cronograma estrategico para declarar marzo-abril-mayo 2026.
+    Considera: fechas vencidas, deducciones, facilidades de pago, y riesgo SAT.
+    """
+    from datetime import date, timedelta
+
+    hoy = date.today()
+
+    # Fechas clave IVA e ISR para PFAE (regimen general)
+    # IVA: mes siguiente dias 1-17
+    # ISR provisional: mes siguiente dias 1-17
+    # ISR anual: abril del siguiente año
+
+    fechas_vencimiento = {
+        "marzo_2026": {
+            "periodo": "2026-03",
+            "iva_vence": "2026-04-17",
+            "isr_vence": "2026-04-17",
+            "dias_retraso_iva": max(0, (hoy - date(2026, 4, 17)).days),
+            "dias_retraso_isr": max(0, (hoy - date(2026, 4, 17)).days),
+            "estado": "VENCIDO" if hoy > date(2026, 4, 17) else "AL DIA",
+        },
+        "abril_2026": {
+            "periodo": "2026-04",
+            "iva_vence": "2026-05-17",
+            "isr_vence": "2026-05-17",
+            "dias_retraso_iva": max(0, (hoy - date(2026, 5, 17)).days),
+            "dias_retraso_isr": max(0, (hoy - date(2026, 5, 17)).days),
+            "estado": "VENCIDO" if hoy > date(2026, 5, 17) else "AL DIA",
+        },
+        "mayo_2026": {
+            "periodo": "2026-05",
+            "iva_vence": "2026-06-17",
+            "isr_vence": "2026-06-17",
+            "dias_retraso_iva": 0,
+            "dias_retraso_isr": 0,
+            "estado": "AL DIA",
+        },
+    }
+
+    # Multas por extemporaneidad
+    multa_base = 1083  # aprox UMAs
+    recargo_mensual = 0.0147  # 1.47% mensual
+
+    # Calcular recargos para marzo
+    meses_retraso_marzo = max(1, (hoy - date(2026, 4, 17)).days // 30)
+    recargo_marzo_iva = 9216 * recargo_mensual * meses_retraso_marzo
+    recargo_marzo_isr = 17280 * recargo_mensual * meses_retraso_marzo
+    multa_extemporanea = multa_base * 2  # una por IVA, una por ISR
+
+    # Calcular recargos para abril (si aplica)
+    meses_retraso_abril = max(0, (hoy - date(2026, 5, 17)).days // 30)
+    recargo_abril = 0
+    if meses_retraso_abril > 0:
+        iva_abril = 950 * 0.16  # ~152
+        isr_abril = 950 * 0.30  # ~285
+        recargo_abril = (iva_abril + isr_abril) * recargo_mensual * meses_retraso_abril
+
+    # Escenarios
+    escenarios = [
+        {
+            "nombre": "ESCENARIO A: Presentar todo HOY con deducciones minimas",
+            "descripcion": "Presentar marzo, abril, mayo hoy. Sin deducciones adicionales.",
+            "acciones": [
+                "1. Presentar IVA marzo: $9,216 + recargos",
+                "2. Presentar ISR marzo: $17,280 + recargos",
+                "3. Presentar abril y mayo",
+                "4. Pagar o solicitar facilidades",
+            ],
+            "costo_marzo": {
+                "iva_base": 9216,
+                "isr_base": 17280,
+                "recargos_iva": round(recargo_marzo_iva, 2),
+                "recargos_isr": round(recargo_marzo_isr, 2),
+                "multas": round(multa_extemporanea, 2),
+                "total_marzo": round(
+                    9216
+                    + 17280
+                    + recargo_marzo_iva
+                    + recargo_marzo_isr
+                    + multa_extemporanea,
+                    2,
+                ),
+            },
+            "costo_abril": round(152 + 285 + recargo_abril, 2),
+            "costo_mayo": 0,
+            "total": round(
+                9216
+                + 17280
+                + recargo_marzo_iva
+                + recargo_marzo_isr
+                + multa_extemporanea
+                + 152
+                + 285
+                + recargo_abril,
+                2,
+            ),
+            "ventaja": "Cierra todo inmediatamente",
+            "riesgo": "Alto pago inmediato si no tienes liquidez",
+        },
+        {
+            "nombre": "ESCENARIO B: Juntar deducciones 15 dias, presentar 31 mayo",
+            "descripcion": "Usar tiempo restante de mayo para recopilar CFDIs de gastos. Presentar todo junto.",
+            "acciones": [
+                "1. Recopilar TODOS CFDIs de gastos hasta 31 mayo",
+                "2. Presentar marzo con deducciones maximas",
+                "3. Presentar abril y mayo",
+                "4. Calcular si compensacion IVA a favor aplica",
+            ],
+            "costo_marzo": {
+                "nota": "Variable segun gastos recopilados",
+                "sin_deducciones": 26496,
+                "con_5000_deducciones": 24196,
+                "con_10000_deducciones": 21896,
+                "con_25000_deducciones": 14996,
+            },
+            "recargos_abril_mayo": "Igual que escenario A si abril ya vencio",
+            "ventaja": "Minimiza impuestos si logras juntar deducciones",
+            "riesgo": "Si no juntas suficientes, pagas igual + recargos extra por esperar",
+        },
+        {
+            "nombre": "ESCENARIO C: Facilidades de pago + presentar puntual",
+            "descripcion": "Presentar declaraciones al dia pero pagar a plazos via SAT",
+            "acciones": [
+                "1. Presentar todas las declaraciones correctamente",
+                "2. Solicitar facilidades de pago SAT",
+                "3. Pagar a 6 o 12 meses",
+            ],
+            "costo": {
+                "deuda_base": 26496,
+                "recargos_facilidades_6meses": round(26496 * 0.015 * 6, 2),
+                "total_6meses": round(26496 * 1.09, 2),
+                "pago_mensual_6meses": round(26496 * 1.09 / 6, 2),
+            },
+            "ventaja": "Presentas al dia (menos multas), pagas a plazos",
+            "riesgo": "Recargos mensuales adicionales",
+        },
+    ]
+
+    # Recomendacion final
+    recomendacion = ""
+    if hoy < date(2026, 5, 17):
+        recomendacion = "ABRIL AUN NO VENCE. Prioridad: presentar abril hoy, juntar deducciones para marzo, presentar marzo antes de junio."
+    elif hoy < date(2026, 6, 17):
+        recomendacion = "ABRIL VENCIDO, MAYO AUN AL DIA. Prioridad: presentar mayo inmediatamente (en ceros si no hay actividad), juntar deducciones para marzo-abril, presentar todo antes de 17 junio."
+    else:
+        recomendacion = "TODO VENCIDO. Prioridad: regularizar completo, solicitar facilidades de pago, juntar deducciones para minimizar."
+
+    return jsonify(
+        {
+            "status": "success",
+            "fecha_hoy": hoy.isoformat(),
+            "resumen_vencimientos": fechas_vencimiento,
+            "multas_estimadas": {
+                "multa_base_extemporaneidad": multa_base,
+                "recargo_mensual": f"{recargo_mensual * 100}%",
+                "meses_retraso_marzo": meses_retraso_marzo,
+                "recargo_estimado_marzo": round(
+                    recargo_marzo_iva + recargo_marzo_isr, 2
+                ),
+            },
+            "escenarios": escenarios,
+            "recomendacion_urgente": recomendacion,
+            "acciones_inmediatas": [
+                "1. Verificar si abril 2026 ya se presento (o vencio)",
+                "2. Si no se presento abril: URGENTE presentar hoy",
+                "3. Recopilar CFDIs de gastos deducibles del periodo",
+                "4. Calcular escenario mas favorable",
+                "5. Presentar marzo con deducciones (o sin ellas si no alcanzas)",
+                "6. Evaluar facilidades de pago si el monto es alto",
+            ],
+        }
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
