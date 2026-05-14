@@ -2194,6 +2194,103 @@ def marco_marzo():
     )
 
 
+@app.route("/marco/facilidades", methods=["GET"])
+def marco_facilidades():
+    """
+    Facilidades de pago SAT para Marco.
+    Calcula pagos diferidos, recargos, y opciones realistas.
+    """
+    base_original = 57600.0
+    iva_original = base_original * 0.16
+    isr_original = base_original * 0.30
+    total_deuda = iva_original + isr_original  # $26,496
+
+    opciones = []
+
+    # Opción 1: Pago único inmediato
+    opciones.append(
+        {
+            "opcion": 1,
+            "nombre": "Pago único inmediato",
+            "plazo_meses": 0,
+            "pago_mensual": total_deuda,
+            "recargos": 0,
+            "total": total_deuda,
+            "requiere": "Liquidez inmediata de $26,496",
+            "ventaja": "Sin recargos, cierra inmediatamente",
+        }
+    )
+
+    # Opción 2: Pago a 6 meses
+    recargos_6 = total_deuda * 0.015 * 6  # 1.5% mensual aprox
+    total_6 = total_deuda + recargos_6
+    opciones.append(
+        {
+            "opcion": 2,
+            "nombre": "Facilidades de pago a 6 meses",
+            "plazo_meses": 6,
+            "pago_mensual": round(total_6 / 6, 2),
+            "recargos": round(recargos_6, 2),
+            "total": round(total_6, 2),
+            "requiere": "Solicitud en SAT portal + compromiso de pago",
+            "ventaja": "Pagos mensuales de ~$4,600, menos presión inmediata",
+        }
+    )
+
+    # Opción 3: Pago a 12 meses
+    recargos_12 = total_deuda * 0.015 * 12
+    total_12 = total_deuda + recargos_12
+    opciones.append(
+        {
+            "opcion": 3,
+            "nombre": "Facilidades de pago a 12 meses",
+            "plazo_meses": 12,
+            "pago_mensual": round(total_12 / 12, 2),
+            "recargos": round(recargos_12, 2),
+            "total": round(total_12, 2),
+            "requiere": "Solicitud en SAT portal + garantía o aval",
+            "ventaja": "Pagos mensuales de ~$2,500, máxima flexibilidad",
+        }
+    )
+
+    # Opción 4: Condonación parcial (si aplica programa)
+    opciones.append(
+        {
+            "opcion": 4,
+            "nombre": "Programa de condonación/regularización",
+            "plazo_meses": "Variable",
+            "pago_mensual": "Variable",
+            "recargos": 0,
+            "total": "Desconocido - depende del programa vigente",
+            "requiere": "Verificar si hay programa activo en SAT.gob.mx",
+            "ventaja": "Posible condonación de recargos y multas",
+            "nota": "Requiere asesoría profesional. No siempre disponible.",
+        }
+    )
+
+    return jsonify(
+        {
+            "status": "success",
+            "deuda_base": round(total_deuda, 2),
+            "detalle_deuda": {
+                "iva": round(iva_original, 2),
+                "isr": round(isr_original, 2),
+            },
+            "opciones": opciones,
+            "como_solicitar": {
+                "portal_sat": "sat.gob.mx → Servicios → Facilidades de pago",
+                "telefono": "55 627 22 728",
+                "requerimientos": [
+                    "Opinión de cumplimiento actualizada",
+                    "No tener adeudos en otro proceso",
+                    "Presentar declaración del periodo primero",
+                ],
+            },
+            "advertencia": "Las facilidades de pago generan recargos mensuales (~1.47% actualización + recargo). Evalúa si te conviene pagar de contado vs. a plazos.",
+        }
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
