@@ -2468,6 +2468,88 @@ def declarar_proceso():
     )
 
 
+# ─── Upload y Análisis de Documentos ────────────────────────────────────
+
+
+@app.route("/upload/estado-cuenta", methods=["POST"])
+def upload_estado_cuenta():
+    """
+    Recibe texto de estado de cuenta (o CSV) y analiza movimientos fiscalmente.
+    Input: JSON con {"texto": "copia-pega del estado", "banco": "Fondeadora", "mes": "2026-03"}
+    Output: Clasificación completa de cada movimiento con impacto fiscal.
+    """
+    data = request.json or {}
+    texto = data.get("texto", "")
+    banco = data.get("banco", "")
+    mes = data.get("mes", "")
+    rfc = data.get("rfc", "MUTM8610091NA")
+
+    if not texto or len(texto) < 50:
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Texto requerido. Pega el estado de cuenta completo.",
+            }
+        ), 400
+
+    try:
+        import time as _time
+
+        start = _time.time()
+        from document_analyzer import EstadoCuentaAnalyzer
+
+        analyzer = EstadoCuentaAnalyzer()
+        resultado = analyzer.analizar(texto, banco=banco, mes=mes)
+
+        # Agregar metadatos
+        resultado.update(
+            {
+                "rfc": rfc,
+                "timestamp": datetime.now().isoformat(),
+                "tiempo_procesamiento": round(_time.time() - start, 3),
+            }
+        )
+
+        return jsonify(resultado)
+
+    except Exception as e:
+        logger.error(f"Error analizando estado de cuenta: {e}", exc_info=True)
+        return jsonify(
+            {"status": "error", "message": f"Error al analizar: {str(e)}"}
+        ), 500
+
+
+@app.route("/analyze/situacion", methods=["POST"])
+def analyze_situacion():
+    """
+    Motor de inteligencia fiscal completo.
+    Recibe: CFDIs + movimientos + emitidos. Retorna: estrategia, riesgo, acciones.
+    """
+    data = request.json or {}
+
+    try:
+        from fiscal_intelligence import FiscalIntelligenceEngine
+
+        engine = FiscalIntelligenceEngine(
+            rfc=data.get("rfc", "MUTM8610091NA"),
+            regimen=data.get("regimen", "PFAE-general"),
+        )
+        engine.context = data.get("contexto", {})
+
+        resultado = engine.analyze(
+            cfdis=data.get("cfdis", []),
+            movimientos=data.get("movimientos", []),
+            facturas_emitidas=data.get("emitidos", []),
+            historial_declaraciones=data.get("historial", {}),
+        )
+
+        return jsonify(resultado)
+
+    except Exception as e:
+        logger.error(f"Error analizando situación fiscal: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"Error: {str(e)}"}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
