@@ -1917,6 +1917,283 @@ def regularizacion_plan():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ─── ENDPOINTS ESPECÍFICOS CASO MARCO 2026 ─────────────────────────
+
+
+@app.route("/marco/emparejar", methods=["GET"])
+def marco_emparejar():
+    """
+    Emparejamiento bancario-fiscal completo del caso Marco 2026.
+    Retorna: emitidos vigentes, duplicados, factura original, complemento de pago,
+             movimientos bancarios clasificados, cálculo fiscal.
+    """
+    cache = load_cache()
+    emitidos = cache.get("emitidos", [])
+    recibidos = cache.get("recibidos", [])
+
+    # Clasificar emitidos
+    factura_original = None
+    complemento = None
+    duplicados = []
+    otros_ingresos = []
+
+    for c in emitidos:
+        uuid = c.get("uuid", "")
+        fecha = c.get("fecha_emision", "")
+        monto = c.get("monto", 0)
+        receptor = c.get("nombre_receptor", "")
+        estatus = c.get("estatus", "")
+
+        fact = {
+            "uuid": uuid,
+            "fecha": fecha,
+            "monto": monto,
+            "receptor": receptor,
+            "rfc_receptor": c.get("rfc_receptor", ""),
+            "estatus": "VIGENTE" if estatus == "1" else "CANCELADO",
+        }
+
+        if uuid == "DA4E4E23-C45D-4EC2-A057-A9606B65FA42":
+            factura_original = fact
+        elif uuid == "98A3AFB9-2E3E-46F3-82DF-D975A2CB5752":
+            complemento = fact
+        elif uuid in [
+            "CF0741C5-D18E-40D2-BF4B-EF48A9A2E3D8",
+            "26072D49-38FD-478A-89D9-7499206C29A4",
+        ]:
+            duplicados.append(fact)
+        elif monto > 0:
+            otros_ingresos.append(fact)
+
+    # Calcular fiscal
+    base_original = 57600.0 if factura_original else 0  # subtotal sin IVA
+    iva_original = base_original * 0.16
+    isr_original = base_original * 0.30
+    total_impuesto = iva_original + isr_original
+
+    # Movimientos bancarios del caso
+    movimientos = [
+        {
+            "fecha": "2026-05-06",
+            "tipo": "ingreso_tercero",
+            "concepto": "SPEI Azteca / OSCAR ROBERTO TRUEBA FERNANDEZ",
+            "monto": 950.00,
+            "declarable": True,
+        },
+        {
+            "fecha": "2026-04-22",
+            "tipo": "transferencia_propia",
+            "concepto": "Transferencia desde Fondeadora",
+            "monto": 9000.00,
+            "declarable": False,
+        },
+        {
+            "fecha": "2026-04-20",
+            "tipo": "transferencia_propia",
+            "concepto": "Transferencia desde Fondeadora",
+            "monto": 1000.00,
+            "declarable": False,
+        },
+        {
+            "fecha": "2026-04-20",
+            "tipo": "transferencia_propia",
+            "concepto": "Transferencia desde Fondeadora",
+            "monto": 2869.00,
+            "declarable": False,
+        },
+        {
+            "fecha": "2026-04-06",
+            "tipo": "transferencia_propia",
+            "concepto": "SPEI NU MEXICO / Marco Arturo Muñoz Del Toro",
+            "monto": 7040.00,
+            "declarable": False,
+        },
+        {
+            "fecha": "2026-04-30",
+            "tipo": "gasto_deducible",
+            "concepto": "GASOL GPO OCTANO",
+            "monto": 1000.00,
+            "declarable": False,
+            "tiene_cfdi": None,
+        },
+        {
+            "fecha": "2026-04-08",
+            "tipo": "gasto_deducible",
+            "concepto": "GASOL GPO OCTANO FLAMI",
+            "monto": 1000.00,
+            "declarable": False,
+            "tiene_cfdi": None,
+        },
+        {
+            "fecha": "2026-04-09",
+            "tipo": "gasto_deducible",
+            "concepto": "OPENAI 5.00 USD TC 17.50",
+            "monto": 87.51,
+            "declarable": False,
+            "tiene_cfdi": None,
+        },
+    ]
+
+    # Deducciones necesarias para llegar a cero
+    deducciones_necesarias = base_original
+
+    # Sugerencias de gastos faltantes
+    sugerencias_gastos = [
+        {
+            "concepto": "Gasolina / transporte",
+            "monto_estimado_mensual": 3000,
+            "acumulado_3meses": 9000,
+            "cfdi_requerido": True,
+        },
+        {
+            "concepto": "Software / tecnología",
+            "monto_estimado_mensual": 1500,
+            "acumulado_3meses": 4500,
+            "cfdi_requerido": True,
+        },
+        {
+            "concepto": "Comidas / hospedaje negocio",
+            "monto_estimado_mensual": 2000,
+            "acumulado_3meses": 6000,
+            "cfdi_requerido": True,
+            "limite_ley": "No más del 10% de ingresos",
+        },
+        {
+            "concepto": "Renta oficina / cowork",
+            "monto_estimado_mensual": 5000,
+            "acumulado_3meses": 15000,
+            "cfdi_requerido": True,
+        },
+        {
+            "concepto": "Servicios profesionales",
+            "monto_estimado_mensual": 3000,
+            "acumulado_3meses": 9000,
+            "cfdi_requerido": True,
+        },
+    ]
+
+    total_sugerido = sum(s["acumulado_3meses"] for s in sugerencias_gastos)
+
+    return jsonify(
+        {
+            "status": "success",
+            "caso": "marco_2026",
+            "rfc": "MUTM8610091NA",
+            "resumen": {
+                "factura_original_ppd": factura_original,
+                "complemento_pago": complemento,
+                "duplicados_pendientes": duplicados,
+                "otros_ingresos": otros_ingresos,
+                "total_emitidos_vigentes": len(emitidos),
+                "total_monto_vigente": sum(
+                    c.get("monto", 0) for c in emitidos if c.get("estatus") == "1"
+                ),
+            },
+            "fiscal_marzo_2026": {
+                "base_gravable": base_original,
+                "iva_trasladado": round(iva_original, 2),
+                "isr_estimado": round(isr_original, 2),
+                "total_impuesto": round(total_impuesto, 2),
+                "deducciones_necesarias_para_cero": deducciones_necesarias,
+            },
+            "movimientos_bancarios": movimientos,
+            "estrategia_deducciones": {
+                "gastos_actuales_detectados": 2087.51,
+                "gastos_faltantes_para_cero": deducciones_necesarias - 2087.51,
+                "sugerencias_gastos": sugerencias_gastos,
+                "total_sugerido_acumulado": total_sugerido,
+                "factible_llegar_a_cero": total_sugerido >= deducciones_necesarias,
+            },
+            "advertencia": "Las deducciones deben ser reales, necesarias para la actividad, y documentadas con CFDIs. El SAT detecta patrones simulados.",
+        }
+    )
+
+
+@app.route("/marco/deducir", methods=["GET"])
+def marco_deducir():
+    """
+    Calculadora: cuánto deducir para minimizar ISR e IVA.
+    Query: ?gastos=20000 (monto de gastos con CFDI que tienes)
+    """
+    gastos = float(request.args.get("gastos", 0))
+    base_original = 57600.0
+    iva_original = base_original * 0.16
+
+    # ISR con deducciones
+    base_isr = max(0, base_original - gastos)
+    isr = base_isr * 0.30
+
+    # IVA con acreditamiento
+    iva_acreditable = gastos * 0.16
+    iva_a_cargo = max(0, iva_original - iva_acreditable)
+
+    # Total
+    total = isr + iva_a_cargo
+
+    return jsonify(
+        {
+            "status": "success",
+            "escenario": f"Con ${gastos:,.2f} en gastos deducibles",
+            "detalle": {
+                "base_gravable_isr": round(base_isr, 2),
+                "isr": round(isr, 2),
+                "iva_trasladado_original": round(iva_original, 2),
+                "iva_acreditable": round(iva_acreditable, 2),
+                "iva_a_cargo": round(iva_a_cargo, 2),
+                "total_impuestos": round(total, 2),
+            },
+            "ahorro_vs_sin_deducciones": round(26496 - total, 2),
+            "mensaje": "Sin deducciones pagas ~$26,496. Cada $1,000 en gastos deducibles reduce ~$460 de impuestos.",
+        }
+    )
+
+
+@app.route("/marco/marzo", methods=["GET"])
+def marco_marzo():
+    """Detalle fiscal del mes marzo 2026 para Marco."""
+    return jsonify(
+        {
+            "status": "success",
+            "mes": "2026-03",
+            "rfc": "MUTM8610091NA",
+            "factura_principal": {
+                "uuid": "DA4E4E23-C45D-4EC2-A057-A9606B65FA42",
+                "fecha": "2026-03-26",
+                "receptor": "BENITTOS FOOD PARTY",
+                "rfc_receptor": "BFP250829MN7",
+                "subtotal": 57600.00,
+                "iva": 9216.00,
+                "total": 66616.00,
+                "metodo_pago": "PPD",
+                "tipo_comprobante": "I (Ingreso)",
+            },
+            "otros_emitidos_mes": [
+                {
+                    "uuid": "CF0741C5-D18E-40D2-BF4B-EF48A9A2E3D8",
+                    "monto": 41669.85,
+                    "nota": "DUPLICADO — cancelar",
+                },
+                {
+                    "uuid": "26072D49-38FD-478A-89D9-7499206C29A4",
+                    "monto": 45889.60,
+                    "nota": "DUPLICADO — cancelar",
+                },
+            ],
+            "obligaciones_mes": {
+                "iva": {"base": 57600.00, "tasa": 0.16, "a_cargo": 9216.00},
+                "isr": {"base": 57600.00, "tasa": 0.30, "estimado": 17280.00},
+                "total_estimado": 26496.00,
+            },
+            "acciones": [
+                "1. Verificar cancelación duplicados en SAT portal",
+                "2. Juntar CFDIs de gastos deducibles del periodo",
+                "3. Presentar declaración antes del 17 de mayo (si es mes actual)",
+                "4. Guardar acuse",
+            ],
+        }
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
