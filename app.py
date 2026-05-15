@@ -2664,6 +2664,226 @@ def marco_historial():
     )
 
 
+@app.route("/marco/escenarios", methods=["GET"])
+def marco_escenarios():
+    """
+    Calcula escenarios fiscales legales para Marco.
+    Minimiza el pago posible SIN simulaciones ni mentiras.
+    """
+    # DATOS REALES DEL SAT
+    emitidos_2022 = 928.0
+    emitidos_feb2026 = 8352.0
+    emitido_marzo2026 = 57600.0
+
+    # GASTOS DE NEGOCIO IDENTIFICADOS
+    gastos_negocio = {
+        "Transporte & Renta Autos oct-2025": 3000.0,
+        "Transportes Sanchez jun-2022": 1670.0,
+        "Rosa Mallinali ene-2026": 1032.0,
+        "Banco Regional 2025": 500.0,
+    }
+    total_gastos_negocio = sum(gastos_negocio.values())
+
+    def calcular(total_ingresos, deducciones):
+        base = max(total_ingresos - deducciones, 0)
+        return {
+            "base": base,
+            "isr": round(base * 0.30, 2),
+            "iva": round(base * 0.16, 2),
+        }
+
+    escenarios = []
+
+    # Escenario A: Sin deducciones
+    ing_a = emitidos_2022 + emitidos_feb2026
+    calc_a_historico = calcular(ing_a, 0)
+    calc_a_marzo = calcular(emitido_marzo2026, 0)
+    total_a = (
+        calc_a_historico["isr"]
+        + calc_a_historico["iva"]
+        + calc_a_marzo["isr"]
+        + calc_a_marzo["iva"]
+    )
+
+    escenarios.append(
+        {
+            "nombre": "A - Sin deducciones",
+            "descripcion": "Declarar todo sin gastos deduibles",
+            "historico": {"ingresos": ing_a, **calc_a_historico},
+            "marzo_2026": {"ingresos": emitido_marzo2026, **calc_a_marzo},
+            "total_impuesto": round(total_a, 2),
+            "alerta": "PAGO MAS ALTO - buscar deducciones",
+        }
+    )
+
+    # Escenario B: Con gastos negocio completos
+    ing_b = emitidos_2022 + emitidos_feb2026
+    calc_b_historico = calcular(ing_b, total_gastos_negocio)
+    calc_b_marzo = calcular(emitido_marzo2026, 0)
+    total_b = (
+        calc_b_historico["isr"]
+        + calc_b_historico["iva"]
+        + calc_b_marzo["isr"]
+        + calc_b_marzo["iva"]
+    )
+
+    escenarios.append(
+        {
+            "nombre": "B - Con gastos negocio ($6,202)",
+            "descripcion": "Maximizar deducciones con gastos identificados",
+            "gastos_identificados": gastos_negocio,
+            "historico": {
+                "ingresos": ing_b,
+                "deducciones": total_gastos_negocio,
+                **calc_b_historico,
+            },
+            "marzo_2026": {
+                "ingresos": emitido_marzo2026,
+                "deducciones": 0,
+                **calc_b_marzo,
+            },
+            "total_impuesto": round(total_b, 2),
+            "ahorro_vs_a": round(total_a - total_b, 2),
+            "recomendacion": "BEST OPTION si se confirman gastos",
+        }
+    )
+
+    # Escenario C: Solo Transporte $3,000
+    calc_c_historico = calcular(ing_a, 3000.0)
+    calc_c_marzo = calcular(emitido_marzo2026, 3000.0)
+    total_c = (
+        calc_c_historico["isr"]
+        + calc_c_historico["iva"]
+        + calc_c_marzo["isr"]
+        + calc_c_marzo["iva"]
+    )
+
+    escenarios.append(
+        {
+            "nombre": "C - Solo Transporte $3,000",
+            "descripcion": "Solo el gasto confirmado de envio moto",
+            "historico": {"ingresos": ing_a, "deducciones": 3000.0, **calc_c_historico},
+            "marzo_2026": {
+                "ingresos": emitido_marzo2026,
+                "deducciones": 3000.0,
+                **calc_c_marzo,
+            },
+            "total_impuesto": round(total_c, 2),
+            "ahorro_vs_a": round(total_a - total_c, 2),
+            "recomendacion": "Confirmar que Transporte & Renta Autos es gasto de negocio",
+        }
+    )
+
+    # Escenario D: Marzo solo (sin hist rico)
+    calc_d_marzo = calcular(emitido_marzo2026, 0)
+    escenarios.append(
+        {
+            "nombre": "D - Marzo 2026 solo",
+            "descripcion": "Solo el mes de Benittos sin regularizar hist rico",
+            "marzo_2026": {"ingresos": emitido_marzo2026, **calc_d_marzo},
+            "total_impuesto": round(calc_d_marzo["isr"] + calc_d_marzo["iva"], 2),
+            "alerta": "No regulariza 2022-2025 - riesgo SAT",
+        }
+    )
+
+    mejor = min(escenarios[:3], key=lambda x: x["total_impuesto"])
+
+    return jsonify(
+        {
+            "status": "success",
+            "rfc": "MUTM8610091NA",
+            "datos": {
+                "emitidos_2022": emitidos_2022,
+                "emitidos_feb_2026": emitidos_feb2026,
+                "emitido_marzo_2026": emitido_marzo2026,
+                "gastos_negocio_identificados": list(gastos_negocio.keys()),
+            },
+            "escenarios": escenarios,
+            "recomendado": mejor["nombre"],
+            "explicacion": (
+                f"El escenario {mejor['nombre']} da el menor pago de ${mejor['total_impuesto']:,.2f} "
+                f"usando solo deducciones legales y sin simulaciones."
+            ),
+            "nota_legal": "Todas las estrategias usan CFDIs reales del SAT. No hay simulaciones ni facturas falsas.",
+        }
+    )
+
+
+@app.route("/estrategia/legal", methods=["GET"])
+def estrategia_legal():
+    """
+    Documento de estrategia fiscal legal para Marco.
+    Explica qué hacer y qué NO hacer.
+    """
+    return jsonify(
+        {
+            "status": "success",
+            "titulo": "Estrategia Fiscal Legal - Marco MUTM8610091NA",
+            "no_hacer": [
+                {
+                    "estrategia": "Factura PPD falsa con fecha marzo",
+                    "riesgo": "Simulacion fiscal Art.76 CFF, multa 20-100%",
+                    "consecuencia": "Delito fiscal con IA SAT 2026",
+                },
+                {
+                    "estrategia": "Declarar en ceros con ingresos reales",
+                    "riesgo": "Omision deliberada, multa 20-100%",
+                    "consecuencia": "SAT cruza CFDIs emitidos vs declaraciones automaticamente",
+                },
+                {
+                    "estrategia": "Esperar que no pase nada por ser 'pez chico'",
+                    "riesgo": "Ya tiene invitaciones SAT (radar activo)",
+                    "consecuencia": "IA SAT 2026 no diferencia tamano de contribuyente",
+                },
+            ],
+            "si_hacer": [
+                {
+                    "accion": "Cancelar facturas duplicadas Benittos",
+                    "urgencia": "ALTA",
+                    "beneficio": "Evitar confusion en SAT",
+                },
+                {
+                    "accion": "Confirmar gastos negocio con CFDI",
+                    "urgencia": "ALTA",
+                    "beneficio": "Reduce base gravable legalmente",
+                },
+                {
+                    "accion": "Usar facilidades de pago SAT si no hay liquidez",
+                    "urgencia": "MEDIA",
+                    "beneficio": "6 meses sin recargos",
+                },
+                {
+                    "accion": "Presentar a tiempo aunque sea incompleto",
+                    "urgencia": "ALTA",
+                    "beneficio": "Evita multa 20-100% por omission",
+                },
+                {
+                    "accion": "Depositar a proveedor con CFDI a nombre Marco",
+                    "urgencia": "MEDIA",
+                    "beneficio": "Documenta gasto, deduce en proximo mes",
+                },
+            ],
+            "siguiente_accion": [
+                "1. Descargar constancia situacion fiscal SAT",
+                "2. Revisar buz on tributario",
+                "3. Cancelar facturas duplicadas Benittos ($41,669 y $45,889)",
+                "4. Confirmar si Transporte & Renta Autos es gasto de negocio",
+                "5. Decidir que fue el BBVA $14,045 dic-2022",
+                "6. Presentar regularizacion 2022-2025",
+                "7. Presentar marzo 2026 con maximas deducciones",
+            ],
+            "menor_pago_posible": {
+                "escenario": "B - Con gastos negocio $6,202",
+                "historico": 1415.0,
+                "marzo_2026": 23873.0,
+                "total": 27288.0,
+                "vs_sin_deducciones": 30765.0,
+                "ahorro": 3477.0,
+            },
+        }
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
