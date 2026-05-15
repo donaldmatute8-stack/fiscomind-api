@@ -2550,6 +2550,120 @@ def analyze_situacion():
         return jsonify({"status": "error", "message": f"Error: {str(e)}"}), 500
 
 
+@app.route("/marco/historial", methods=["GET"])
+def marco_historial():
+    """
+    Historial fiscal completo 2022-2026.
+    Detecta meses con ingresos que IMPIDEN declarar en ceros.
+    Muestra lo que tu contadora NO ve en el SAT.
+    """
+    cache = load_cache()
+    recibidos = cache.get("recibidos", [])
+    emitidos = cache.get("emitidos", [])
+
+    # Agrupar recibidos por mes
+    meses_data = {}
+    for c in recibidos:
+        fecha = c.get("fecha_emision", "")
+        if len(fecha) >= 7:
+            mes = fecha[:7]
+            efecto = c.get("efecto", "")
+            monto = float(c.get("monto", 0))
+            if mes not in meses_data:
+                meses_data[mes] = {
+                    "ingresos": 0,
+                    "egresos": 0,
+                    "pagos": 0,
+                    "cfdis_count": 0,
+                    "emitidos": 0,
+                }
+            meses_data[mes][
+                {"I": "ingresos", "E": "egresos", "P": "pagos"}.get(efecto, "otros")
+            ] += monto
+            meses_data[mes]["cfdis_count"] += 1
+
+    # Agregar emitidos por mes
+    for c in emitidos:
+        fecha = c.get("fecha_emision", "")
+        if len(fecha) >= 7 and c.get("estatus") == "1":
+            mes = fecha[:7]
+            monto = float(c.get("monto", 0))
+            if mes not in meses_data:
+                meses_data[mes] = {
+                    "ingresos": 0,
+                    "egresos": 0,
+                    "pagos": 0,
+                    "cfdis_count": 0,
+                    "emitidos": 0,
+                }
+            meses_data[mes]["emitidos"] += monto
+
+    # Evaluar cada mes
+    resultado_meses = []
+    meses_criticos = []
+    total_ingresos = 0
+    total_emitidos = 0
+
+    for mes in sorted(meses_data.keys()):
+        d = meses_data[mes]
+        total_mes = d["ingresos"] + d["egresos"] + d["pagos"]
+        hay_emitidos = d["emitidos"] > 0
+
+        puede_ceros = total_mes < 1000 and not hay_emitidos
+
+        mes_info = {
+            "mes": mes,
+            "ingresos_recibidos": round(d["ingresos"], 2),
+            "egresos_recibidos": round(d["egresos"], 2),
+            "pagos_recibidos": round(d["pagos"], 2),
+            "emitidos": round(d["emitidos"], 2),
+            "total_actividad": round(total_mes + d["emitidos"], 2),
+            "cfdis_count": d["cfdis_count"],
+            "puede_declarar_ceros": puede_ceros,
+            "riesgo_ceros": "BAJO" if puede_ceros else "ALTO",
+            "explicacion": (
+                "Puede ser ceros si son gastos personales"
+                if puede_ceros
+                else "Tiene actividad económica detectada. NO declarar ceros."
+            ),
+        }
+
+        resultado_meses.append(mes_info)
+        total_ingresos += d["ingresos"]
+        total_emitidos += d["emitidos"]
+
+        if not puede_ceros:
+            meses_criticos.append(mes)
+
+    # Evaluación global
+    total_meses = len(resultado_meses)
+    meses_ok = sum(1 for m in resultado_meses if m["puede_declarar_ceros"])
+    meses_nok = total_meses - meses_ok
+
+    return jsonify(
+        {
+            "status": "success",
+            "rfc": "MUTM8610091NA",
+            "analisis_periodo": "2022-01 a 2026-02",
+            "resumen_global": {
+                "total_meses_con_cfdis": total_meses,
+                "meses_que_pueden_ser_ceros": meses_ok,
+                "meses_con_actividad_real": meses_nok,
+                "meses_criticos": meses_criticos,
+                "total_ingresos_recibidos": round(total_ingresos, 2),
+                "total_emitidos": round(total_emitidos, 2),
+            },
+            "advertencia_contadora": "Muchas contadoras NO revisan CFDIs recibidos en el SAT. Solo ven emitidos. Los CFDIs recibidos PROVEEN que hubo actividad económica.",
+            "meses_detalle": resultado_meses,
+            "recomendacion_final": (
+                f"De {total_meses} meses con CFDIs, {meses_nok} tienen actividad real. "
+                f"NO puedes declarar ceros en: {', '.join(meses_criticos[:10])}. "
+                f"La estrategia de 'todos ceros' es RIESGOSA con la IA del SAT 2026."
+            ),
+        }
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
